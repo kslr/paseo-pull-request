@@ -4,10 +4,14 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import type { PaseoApi, PaseoAgentHandle, PaseoAgentRunResult } from "@getpaseo/client";
-import { PaseoConfigSchema } from "@getpaseo/protocol/paseo-config-schema";
+import type { PaseoApi, PaseoAgentHandle, PaseoAgentRunResult } from "../paseoApi.ts";
 import { GitRepository } from "./repository.ts";
 import { readOnlyGenerationConfig, resolveStructuredGenerationProviders } from "./providers.ts";
+
+// paseo.json's metadataGeneration section, read as leniently as Paseo reads it: an invalid entry
+// falls back to the default style.
+const styleOverride = z.object({ instructions: z.string().optional() }).passthrough().optional().catch(undefined);
+const PaseoConfigSchema = z.object({ metadataGeneration: z.object({ commitMessage: styleOverride, pullRequest: styleOverride, branchName: styleOverride }).passthrough().optional().catch(undefined) }).passthrough();
 
 type StyleKey = "commitMessage" | "pullRequest" | "branchName";
 // Paseo's style text for each part; paseo.json's metadataGeneration instructions replace it.

@@ -1,5 +1,5 @@
 // A PaseoApi double for generation tests: records created, retried and archived agents.
-import type { PaseoApi, PaseoAgentCreateOptions, PaseoAgentRunResult } from "@getpaseo/client";
+import type { PaseoApi, PaseoAgentCreateOptions, PaseoAgentRunResult } from "../paseoApi.ts";
 import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
 export function fakePaseo(generate: (input: Omit<PaseoAgentCreateOptions, "cwd"> & { workspaceId: string }, attempt: number) => unknown | Promise<unknown> = () => ({ commitMessage: "Update files", title: "Update", body: "Body", branch: "update" }), options: { providers?: { provider: string; model?: string; thinkingOptionId?: string }[]; entries?: ProviderSnapshotEntry[]; createError?: boolean; archiveError?: boolean; archive?: (id: number) => Promise<void> } = {}) {
   const created: (Omit<PaseoAgentCreateOptions, "cwd"> & { workspaceId: string })[] = [], archived: number[] = [], retries: string[] = [];

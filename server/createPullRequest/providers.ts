@@ -1,6 +1,6 @@
 // Which models write the metadata, from Paseo's metadata generation settings, and how each runs
 // read-only. Uses the public config and provider snapshot APIs; focused selection is not exposed to plugins.
-import type { PaseoApi, PaseoAgentConfig } from "@getpaseo/client";
+import type { PaseoApi, PaseoAgentConfig } from "../paseoApi.ts";
 import type { AgentModelDefinition, ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
 export interface GenerationProvider { provider: string; model?: string; thinkingOptionId?: string }
 const DEFAULT_STRUCTURED_GENERATION_PROVIDERS = [

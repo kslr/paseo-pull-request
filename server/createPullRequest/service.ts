@@ -2,7 +2,7 @@
 // and runs held in memory for the client to poll, one per checkout at a time.
 import { resolve } from "node:path";
 import type { RpcInput } from "@getpaseo/plugin";
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi } from "../paseoApi.ts";
 import { startCreatePullRequestRpc } from "../../shared/createPullRequest.ts";
 import type { CreatePullRequestRun, GitStatus } from "../../shared/createPullRequest.ts";
 import { CommandError, redactError, runCommand } from "../process.ts";
