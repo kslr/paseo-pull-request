@@ -11,8 +11,8 @@ const directory = z.object({ directory: z.string().min(1) });
 
 export const gitStatusSchema = z.object({
   isRepo: z.boolean(),
-  // origin exists, even when push could use another remote.
-  hasPrimaryRemote: z.boolean(),
+  // A pull request needs one; the push goes wherever `git push` would.
+  hasGitHubRemote: z.boolean(),
   isDefaultRef: z.boolean(),
   refName: text.nullable(),
   hasWorkingTreeChanges: z.boolean(),

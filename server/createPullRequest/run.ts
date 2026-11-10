@@ -17,10 +17,10 @@ async function prepare(repo: GitRepository, phase: Phase): Promise<Plan> {
   if (!start.status.isRepo) throw new Error("This directory is not a Git repository.");
   // Otherwise the base and the diff the PR text is written from are whatever was last fetched.
   // Offline, the run goes on with the refs it has.
-  if (start.primary && start.defaultRef) {
+  if (start.baseRemote && start.defaultRef) {
     phase(`Fetching ${start.defaultRef}...`);
-    const refspec = `+refs/heads/${start.defaultRef}:refs/remotes/${start.primary}/${start.defaultRef}`;
-    if (await succeeds(repo.git(["fetch", "--quiet", "--no-tags", start.primary, refspec]))) start = await repo.readStatus();
+    const refspec = `+refs/heads/${start.defaultRef}:refs/remotes/${start.baseRemote}/${start.defaultRef}`;
+    if (await succeeds(repo.git(["fetch", "--quiet", "--no-tags", start.baseRemote, refspec]))) start = await repo.readStatus();
   }
   const { status: { refName, isDefaultRef }, defaultRef, baseRef } = start;
   if (!refName) throw new Error("Cannot create a pull request from detached HEAD.");
@@ -32,9 +32,9 @@ async function prepare(repo: GitRepository, phase: Phase): Promise<Plan> {
 // The new branch starts at the remote's default branch when the local one is only behind it, so
 // the pull request does not start out of date; the uncommitted changes come along. With local
 // commits, or changes that collide with the remote's, it starts at HEAD.
-async function cutFeatureBranch(repo: GitRepository, { primary, defaultRef }: RepositoryStatus, preferred?: string) {
+async function cutFeatureBranch(repo: GitRepository, { baseRemote, defaultRef }: RepositoryStatus, preferred?: string) {
   const branch = featureBranchName((await repo.git(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"])).split("\n"), preferred);
-  const remoteTip = primary && defaultRef ? `refs/remotes/${primary}/${defaultRef}` : null;
+  const remoteTip = baseRemote && defaultRef ? `refs/remotes/${baseRemote}/${defaultRef}` : null;
   const startedAtRemote = remoteTip !== null
     && await succeeds(repo.git(["merge-base", "--is-ancestor", "HEAD", remoteTip]))
     && await succeeds(repo.git(["switch", "--quiet", "--no-track", "-c", branch, remoteTip]));
@@ -57,20 +57,10 @@ async function commitChanges(repo: GitRepository, generator: GitMetadataGenerato
   return { branch, commit: { sha: await repo.git(["rev-parse", "HEAD"]), subject: commitMessage }, text: { title, body } };
 }
 
-// HEAD goes to the remote branch of the same name. A branch tracking another name, such as one cut
-// from origin/main, is published under its own name rather than overwriting that one.
-async function push(repo: GitRepository, branch: string) {
-  const { status, primary } = await repo.readStatus();
-  if (!status.hasUpstream) {
-    if (!primary) throw new Error("Cannot push because no git remote is configured for this repository.");
-    await repo.git(["push", "-u", "--", primary, "HEAD"]);
-    return;
-  }
-  if (status.aheadCount === 0) return;
-  const remote = await repo.git(["config", "--get", `branch.${branch}.remote`]);
-  const tracksOwnName = (await repo.git(["config", "--get", `branch.${branch}.merge`])) === `refs/heads/${branch}`;
-  await repo.git(["push", ...(tracksOwnName ? [] : ["-u"]), "--", remote, `HEAD:refs/heads/${branch}`]);
-}
+// To the remote `git push` would choose, as the user configured git, under the branch's own name:
+// a branch tracking another, such as one cut from origin/main, does not overwrite it. A branch
+// without an upstream gets the pushed one.
+const push = (repo: GitRepository) => repo.git(["-c", "push.default=current", "-c", "push.autoSetupRemote=true", "push"]);
 
 // gh prints the new pull request's URL as its last line.
 export function parseCreatedPullRequest(output: string) {
@@ -100,7 +90,7 @@ export async function createPullRequest(repo: GitRepository, generator: GitMetad
   const plan = await prepare(repo, phase);
   const committed = await commitChanges(repo, generator, phase, plan);
   phase("Pushing...");
-  await push(repo, committed.branch);
+  await push(repo);
   const pr = await propose(repo, generator, phase, plan, committed);
   return { branch: plan.cutsBranch ? committed.branch : null, commit: committed.commit, pr };
 }

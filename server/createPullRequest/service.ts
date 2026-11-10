@@ -23,8 +23,12 @@ interface Job { state: CreatePullRequestRun; controller: AbortController; done: 
 const runKey = (directory: string, runId: string) => `${directory}\0${runId}`;
 const running = (label: string): CreatePullRequestRun => ({ status: "running", label, lastOutputLine: null, phaseStartedAt: Date.now() });
 // The steps a user follows as they run: commit hooks, the push, creating the pull request. The
-// plumbing around them would only show paths and hashes.
-const isReported = (file: string, [command]: string[]) => file === "gh" ? command === "pr" : command === "commit" || command === "push";
+// plumbing around them would only show paths and hashes. A git command may lead with -c settings.
+const isReported = (file: string, args: string[]) => {
+  if (file === "gh") return args[0] === "pr";
+  const command = args.find((arg, index) => arg !== "-c" && args[index - 1] !== "-c");
+  return command === "commit" || command === "push";
+};
 // No GitHub remote, gh missing or signed out, offline: the checkout still has a status, without a
 // pull request. A cancelled lookup is not one of these.
 const withoutPullRequest = (error: unknown) => error instanceof UnavailableError || commandFailed(error);

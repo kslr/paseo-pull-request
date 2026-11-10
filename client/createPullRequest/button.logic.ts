@@ -23,14 +23,13 @@ function blockedReason(status: GitStatus | null): string | null {
   // Unless something was added since, a merged or closed pull request leaves nothing to propose.
   if (pr && !status.hasWorkingTreeChanges && status.aheadCount === 0) return `Pull request #${pr.number} is already ${pr.state}.`;
   if (refName === null) return "Create and checkout a ref before pushing or opening a pull request.";
-  const noOrigin = 'Add an "origin" remote before creating a pull request.';
+  if (!status.hasGitHubRemote) return "Add a GitHub remote before creating a pull request.";
   // Uncommitted changes are committed by the run, onto a feature branch named from them when on
   // the default branch.
-  if (status.hasWorkingTreeChanges) return status.hasUpstream || status.hasPrimaryRemote ? null : noOrigin;
+  if (status.hasWorkingTreeChanges) return null;
   // Otherwise the run only pushes the commits already on the branch: is there anything to push
   // and propose, and can it be pushed as it is?
   if (!status.hasUpstream) {
-    if (!status.hasPrimaryRemote) return noOrigin;
     if (status.aheadCount === 0) return "No local commits to push.";
   } else if (status.behindCount > 0) {
     return status.aheadCount > 0 ? "Branch has diverged from upstream. Rebase/merge first." : "Branch is behind upstream. Pull/rebase before creating a pull request.";

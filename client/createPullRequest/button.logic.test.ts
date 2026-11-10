@@ -12,7 +12,7 @@ import {
 function status(overrides: Partial<GitStatus> = {}): GitStatus {
   return {
     isRepo: true,
-    hasPrimaryRemote: true,
+    hasGitHubRemote: true,
     isDefaultRef: false,
     refName: "feature/test",
     hasWorkingTreeChanges: false,
@@ -71,9 +71,9 @@ describe("resolveCreatePullRequestButton", () => {
 
   it("says what to do first when the branch cannot be proposed as it is", () => {
     assert.deepEqual(resolveCreatePullRequestButton(status({ behindCount: 2 })), { kind: "disabled", hint: "Branch is behind upstream. Pull/rebase before creating a pull request." });
-    const noRemote = { hasPrimaryRemote: false, hasUpstream: false };
-    assert.deepEqual(resolveCreatePullRequestButton(status({ ...noRemote, hasWorkingTreeChanges: true })), { kind: "disabled", hint: 'Add an "origin" remote before creating a pull request.' });
-    assert.deepEqual(resolveCreatePullRequestButton(status({ ...noRemote, aheadCount: 1 })), { kind: "disabled", hint: 'Add an "origin" remote before creating a pull request.' });
+    const noGitHub = { kind: "disabled", hint: "Add a GitHub remote before creating a pull request." } as const;
+    assert.deepEqual(resolveCreatePullRequestButton(status({ hasGitHubRemote: false, hasWorkingTreeChanges: true })), noGitHub);
+    assert.deepEqual(resolveCreatePullRequestButton(status({ hasGitHubRemote: false, hasUpstream: false, aheadCount: 1 })), noGitHub);
     assert.deepEqual(resolveCreatePullRequestButton(status({ isRepo: false, refName: null })), { kind: "disabled", hint: "Not a Git repository." });
   });
 });

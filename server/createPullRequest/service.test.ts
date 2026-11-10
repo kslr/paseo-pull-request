@@ -69,7 +69,7 @@ test("status reports changes, upstream and how far the branch is ahead of the de
   try {
     await mkdir(join(h.directory, "sub"));
     assert.deepEqual(gitStatusSchema.parse(await h.service.status({ directory: join(h.directory, "sub") })), {
-      isRepo: true, hasPrimaryRemote: true, isDefaultRef: true, refName: "main", hasWorkingTreeChanges: false,
+      isRepo: true, hasGitHubRemote: true, isDefaultRef: true, refName: "main", hasWorkingTreeChanges: false,
       hasUpstream: true, aheadCount: 0, behindCount: 0, aheadOfDefaultCount: 0, pr: null,
     });
     await h.git(["checkout", "-b", "feature"]);
@@ -82,7 +82,7 @@ test("status reports changes, upstream and how far the branch is ahead of the de
   } finally { await h.dispose(); }
 });
 
-test("missing gh leaves status usable; the default branch falls back to repo view; another remote name is not origin", async () => {
+test("missing gh leaves status usable, and the default branch falls back to repo view", async () => {
   const h = await harness(async () => { throw new CommandError("spawn gh ENOENT", "ENOENT"); });
   try { assert.equal((await h.service.status(h)).pr, null); }
   finally { await h.dispose(); }
@@ -91,8 +91,6 @@ test("missing gh leaves status usable; the default branch falls back to repo vie
     await other.git(["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
     assert.equal((await other.service.status(other)).isDefaultRef, true);
     assert.deepEqual(other.calls.find(c => c.file === "gh" && c.args[0] === "repo")!.args, ["repo", "view", "github.com/owner/repo", "--json", "defaultBranchRef"]);
-    await other.git(["remote", "rename", "origin", "upstream"]);
-    assert.equal((await other.service.status(other)).hasPrimaryRemote, false);
   } finally { await other.dispose(); }
 });
 
@@ -133,7 +131,7 @@ for (const onDefault of [true, false]) test(`generation sees everything since th
     await entered.promise;
     const progress = h.service.poll({ directory: h.directory, runId: "run" });
     assert.equal(progress.status === "running" && progress.label, "Generating commit message and PR...");
-    assert.ok(!h.calls.some(c => ["commit", "push", "checkout", "switch", "pr"].includes(c.args[0])));
+    assert.ok(!h.calls.some(c => c.args.some(arg => ["commit", "push", "checkout", "switch", "pr"].includes(arg))));
     const prompt = api.created[0].prompt!;
     assert.ok(prompt.includes("+pending staged change")); assert.ok(prompt.includes("A\tstaged.txt\t(+1 -0)"));
     assert.equal(prompt.includes("Branch style:"), onDefault);
@@ -183,9 +181,21 @@ test("a branch tracking a differently named base is published under its own name
     await h.git(["checkout", "-b", "feature", "origin/main"]);
     await writeFile(join(h.directory, "feature"), "feature");
     const result = succeeded(await h.run());
-    assert.equal(await h.git(["rev-parse", "--abbrev-ref", "@{upstream}"]), "origin/feature");
     assert.equal(await h.git(["rev-parse", "refs/heads/main"], h.bare), main);
     assert.equal(await h.git(["rev-parse", "refs/heads/feature"], h.bare), result.commit?.sha);
+  } finally { await h.dispose(); }
+});
+
+test("the push goes where git push would, such as the configured push remote", async () => {
+  const h = await harness(gitHub, generated());
+  try {
+    const other = join(h.root, "other.git");
+    await h.git(["init", "--bare", "-b", "main", other]); await h.git(["remote", "add", "other", other]);
+    await h.git(["config", "remote.pushDefault", "other"]);
+    await h.git(["checkout", "-b", "feature"]); await writeFile(join(h.directory, "new"), "new");
+    const result = succeeded(await h.run());
+    assert.equal(await h.git(["rev-parse", "refs/heads/feature"], other), result.commit?.sha);
+    assert.equal(await h.git(["rev-parse", "--abbrev-ref", "@{upstream}"]), "other/feature");
   } finally { await h.dispose(); }
 });
 
@@ -210,7 +220,7 @@ test("a failing hook stops the run with its message", async () => {
     const hook = join(h.directory, ".git/hooks/pre-commit"); await writeFile(hook, "#!/bin/sh\necho 'Hook rejected commit.' >&2\nexit 1\n"); await chmod(hook, 0o755);
     const state = await h.run("hook");
     assert.deepEqual(state, { status: "failed", message: "Hook rejected commit." });
-    assert.ok(!h.calls.some(c => c.args[0] === "push" || c.args[0] === "pr"));
+    assert.ok(!h.calls.some(c => c.args.includes("push") || c.args[0] === "pr"));
     assert.equal(await h.git(["log", "-1", "--format=%s"]), "Initial");
   } finally { await h.dispose(); }
 });
@@ -238,7 +248,7 @@ test("detached HEAD, and the default branch with nothing to commit, fail without
     assert.match((await h.run("clean-main") as { message: string }).message, /no changes to commit/);
     await h.git(["checkout", "--detach"]);
     assert.match((await h.run("detached") as { message: string }).message, /detached HEAD/);
-    assert.ok(!h.calls.some(c => c.args[0] === "push"));
+    assert.ok(!h.calls.some(c => c.args.includes("push")));
   } finally { await h.dispose(); }
 });
 
