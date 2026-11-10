@@ -80,8 +80,8 @@ export function parseCreatedPullRequest(output: string) {
 }
 
 async function propose(repo: GitRepository, generator: GitMetadataGenerator, phase: Phase, plan: Plan, committed: Committed): Promise<CreatePullRequestResult["pr"]> {
-  const remote = await repo.github.remote(repo.directory);
-  const existing = await repo.github.branchPullRequest(repo.directory, remote, committed.branch);
+  const remote = await repo.github.remote();
+  const existing = await repo.github.branchPullRequest(remote, committed.branch);
   if (existing?.state === "open") return { status: "opened_existing", number: existing.number, url: existing.url, title: existing.title };
   let text = committed.text;
   if (!text) {

@@ -3,11 +3,11 @@
 // started and then polled.
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { prStateSchema } from "./pullRequest.ts";
 
 const text = z.string().trim().min(1);
 const count = z.number().int().nonnegative();
 const directory = z.object({ directory: z.string().min(1) });
-const prState = z.enum(["open", "closed", "merged"]);
 
 export const gitStatusSchema = z.object({
   isRepo: z.boolean(),
@@ -20,7 +20,7 @@ export const gitStatusSchema = z.object({
   aheadCount: count,
   behindCount: count,
   aheadOfDefaultCount: count.nullable(),
-  pr: z.object({ number: z.number().int().positive(), title: text, url: z.string(), state: prState }).nullable(),
+  pr: z.object({ number: z.number().int().positive(), title: text, url: z.string(), state: prStateSchema }).nullable(),
 });
 
 const createPullRequestResultSchema = z.object({

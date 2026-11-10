@@ -7,9 +7,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, type ReactNode } from "react";
 import { Text, View } from "react-native";
 import * as c from "../../shared/pullRequest.ts";
-import { subscribe as subscribeGitActionEvents } from "../createPullRequest/events.ts";
+import { onPullRequestChanged } from "../pullRequestChanged.ts";
 import { PullRequestDetail, pullRequestQueryKey } from "./PullRequestDetail.tsx";
-import { buildFixFailingChecksPrompt, buildResolveConflictsPrompt, describeUnavailable, pickTemplateAgent } from "./pullRequest.logic.ts";
+import { describeUnavailable, pickTemplateAgent } from "./pullRequest.logic.ts";
 import { rpcErrorMessage } from "../rpcErrorMessage.ts";
 import { Button, IconButton, monoFont, Notice, Toolbar } from "../ui.tsx";
 
@@ -50,8 +50,8 @@ function BranchPullRequest({ theme, compact, tab, directory, workspaceId, naviga
   const query = useQuery({ queryKey: resolveKey, queryFn: () => resolve({ directory }), staleTime: 0, refetchOnMount: "always" });
   useEffect(
     () =>
-      subscribeGitActionEvents((event) => {
-        if (event.directory === directory) void queryClient.invalidateQueries({ queryKey: pullRequestQueryKey(directory) });
+      onPullRequestChanged((changed) => {
+        if (changed === directory) void queryClient.invalidateQueries({ queryKey: pullRequestQueryKey(directory) });
       }),
     [directory, queryClient],
   );
@@ -89,27 +89,7 @@ function BranchPullRequest({ theme, compact, tab, directory, workspaceId, naviga
       </>
     );
   }
-  return (
-    <PullRequestDetail
-      key={`${result.repository}#${result.number}`}
-      theme={theme}
-      compact={compact}
-      tab={tab}
-      prRef={{ directory, repository: result.repository, number: result.number }}
-      onResolveConflicts={(detail) =>
-        handOff({
-          title: `Resolve conflicts in PR #${detail.number}`,
-          prompt: buildResolveConflictsPrompt({ number: detail.number, url: detail.url, headBranch: detail.headBranch, baseBranch: detail.baseBranch }),
-        })
-      }
-      onFixFailingChecks={(detail, failing) =>
-        handOff({
-          title: `Fix failing checks in PR #${detail.number}`,
-          prompt: buildFixFailingChecksPrompt({ number: detail.number, url: detail.url, headBranch: detail.headBranch, checks: failing }),
-        })
-      }
-    />
-  );
+  return <PullRequestDetail key={`${result.repository}#${result.number}`} theme={theme} compact={compact} tab={tab} prRef={{ directory, repository: result.repository, number: result.number }} handOff={handOff} />;
 }
 
 export function WorkspacePullRequestPanel({ theme, layout, tab, workspaceId, navigation }: PluginWorkspacePanelProps) {

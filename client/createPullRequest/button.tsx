@@ -20,7 +20,7 @@ import {
   resolveCreatePullRequestProgress,
   type RunningCreatePullRequest,
 } from "./button.logic.ts";
-import { emit } from "./events.ts";
+import { pullRequestChanged } from "../pullRequestChanged.ts";
 
 type Workspace = Awaited<ReturnType<PluginClientContext["paseo"]["workspaces"]["list"]>>["entries"][number];
 
@@ -33,21 +33,6 @@ const SUCCESS_TOAST_MS = 10_000;
 // Paseo's toast is a hook. The button's icon, which Paseo renders in the header, lends it to the
 // code below, which runs outside React (an action's result).
 let toast: ToastApi | null = null;
-
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) return reject(signal.reason);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
 
 // Paseo gives plugin header labels the muted colour at its small size (12px by default) and no option
 // to change either; its own git button's label is the foreground colour at the base size (14px). On
@@ -187,7 +172,7 @@ function createPullRequestButton(client: PluginClientContext, workspaceId: strin
 
   function openPullRequest(): void {
     client.openPanel("pull-request", { workspaceId, location: "explorer" });
-    emit({ directory });
+    pullRequestChanged(directory);
   }
 
   // Started and polled. A failure is thrown for Paseo's error toast.
@@ -203,7 +188,8 @@ function createPullRequestButton(client: PluginClientContext, workspaceId: strin
       while (run.status === "running") {
         activeRun.run = run;
         publish();
-        await delay(RUN_POLL_INTERVAL_MS, signal);
+        await new Promise((resolve) => setTimeout(resolve, RUN_POLL_INTERVAL_MS));
+        if (signal.aborted) return;
         run = await client.rpc(createPullRequestRunRpc, { directory, runId });
       }
       if (run.status === "failed") throw new Error(run.message);

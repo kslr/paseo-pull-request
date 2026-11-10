@@ -1,12 +1,14 @@
-// The workspace's GitHub side through the gh CLI: which remotes point at GitHub, whether gh can
-// reach the host, GraphQL documents scoped to one repository, and the pull request of a branch.
+// A checkout's GitHub side through the gh CLI: which remotes point at GitHub, whether gh can reach
+// the host, GraphQL queries scoped to one repository, and the pull request of a branch.
+import type { GitStatus } from "../shared/createPullRequest.ts";
 import { repositorySchema } from "../shared/pullRequest.ts";
 import type { UnavailableReason } from "../shared/pullRequest.ts";
 import { CommandError, redactError, runCommand } from "./process.ts";
 import type { Runner } from "./process.ts";
 
 export interface Remote { name: string; host: string; repository: string }
-export interface BranchPullRequest { number: number; url: string; title: string; state: "open" | "closed" | "merged" }
+type Repository = Omit<Remote, "name">;
+type BranchPullRequest = NonNullable<GitStatus["pr"]>;
 
 export class UnavailableError extends Error {
   reason: Exclude<UnavailableReason, "error">;
@@ -30,7 +32,7 @@ function urlTarget(value: string) {
   return host ? { host, path } : null;
 }
 
-export function parseRemoteUrl(value: string): Omit<Remote, "name"> | null {
+export function parseRemoteUrl(value: string): Repository | null {
   const scp = SCP_REMOTE.exec(value);
   const target = urlTarget(value) ?? (scp && { host: scp[1], path: scp[2] });
   if (!target) return null;
@@ -55,10 +57,6 @@ export function repositoryQuery(variables: Record<string, string>, selection: st
   const declared = Object.entries({ owner: "String!", name: "String!", ...variables }).map(([name, type]) => `$${name}:${type}`);
   return `query(${declared.join(",")}) { repository(owner:$owner,name:$name) { ${selection} } }`;
 }
-// A mutation taking GitHub's conventional single `input` argument of type <Field>Input.
-export function mutationDocument(field: string) {
-  return `mutation($input:${field[0].toUpperCase()}${field.slice(1)}Input!) { ${field}(input:$input) { clientMutationId } }`;
-}
 
 // The two newest pull requests of a branch: its open one, and any.
 const branchPullRequests = (alias: string, filter: string) =>
@@ -67,43 +65,44 @@ const branchQuery = repositoryQuery({ head: "String!" }, `${branchPullRequests("
 type BranchNode = Omit<BranchPullRequest, "state"> & { state: string };
 
 export class GitHub {
+  readonly directory: string;
   readonly run: Runner;
-  constructor(run: Runner = runCommand) { this.run = run; }
+  constructor(directory: string, run: Runner = runCommand) { this.directory = directory; this.run = run; }
 
-  async remotes(directory: string): Promise<Remote[]> {
-    const listed = await this.run("git", ["remote", "-v"], { cwd: directory }).catch((error: Error) => {
+  async remotes(): Promise<Remote[]> {
+    const listed = await this.run("git", ["remote", "-v"], { cwd: this.directory }).catch((error: Error) => {
       throw /not a git repository/i.test(error.message) ? new UnavailableError("not-git", "This directory is not a Git repository.") : error;
     });
     return parseRemotes(listed.stdout);
   }
-  async remote(directory: string): Promise<Remote> {
-    const [first] = await this.remotes(directory);
+  async remote(): Promise<Remote> {
+    const [first] = await this.remotes();
     if (!first) throw new UnavailableError("no-github-remote", "This repository has no GitHub remote.");
     return first;
   }
-  async auth(directory: string, host: string) {
-    await this.run("gh", ["auth", "status", "--hostname", host], { cwd: directory }).catch((error: Error) => {
+  async auth(host: string) {
+    await this.run("gh", ["auth", "status", "--hostname", host], { cwd: this.directory }).catch((error: Error) => {
       if (error instanceof CommandError && error.code === "ENOENT") throw new UnavailableError("gh-missing", "GitHub CLI is not installed on the daemon. Install gh to use pull requests.");
       throw new UnavailableError("gh-unauthenticated", `${error.message}\nRun gh auth login --hostname ${host} on the daemon.`);
     });
   }
   // The request goes through stdin, so no field value ever becomes a command-line argument.
-  async graphql<T = unknown>(directory: string, host: string, query: string, variables: Record<string, unknown> = {}): Promise<T> {
+  async graphql<T = unknown>(host: string, query: string, variables: Record<string, unknown> = {}): Promise<T> {
     const args = ["api", "--hostname", host, "graphql", "--method", "POST", "-H", "Accept: application/vnd.github+json", "--input", "-"];
-    const { stdout } = await this.run("gh", args, { cwd: directory, input: JSON.stringify({ query, variables }) });
+    const { stdout } = await this.run("gh", args, { cwd: this.directory, input: JSON.stringify({ query, variables }) });
     const { data, errors } = JSON.parse(stdout) as { data: T; errors?: { message: string }[] };
     if (errors?.length) throw new Error(redactError(errors.map(error => error.message).join("\n")));
     return data;
   }
   // `repository` of a repositoryQuery, or null when GitHub does not show it to the viewer.
-  async repository<T>(directory: string, host: string, repository: string, query: string, variables: Record<string, unknown> = {}): Promise<T | null> {
+  async repository<T>({ host, repository }: Repository, query: string, variables: Record<string, unknown> = {}): Promise<T | null> {
     const [owner, name] = repository.split("/");
-    const data = await this.graphql<{ repository?: T | null } | null>(directory, host, query, { owner, name, ...variables });
+    const data = await this.graphql<{ repository?: T | null } | null>(host, query, { owner, name, ...variables });
     return data?.repository ?? null;
   }
   // The branch's open pull request, else its most recently updated one.
-  async branchPullRequest(directory: string, remote: Remote, branch: string): Promise<BranchPullRequest | null> {
-    const found = await this.repository<Record<"open" | "latest", { nodes: BranchNode[] }>>(directory, remote.host, remote.repository, branchQuery, { head: branch });
+  async branchPullRequest(remote: Repository, branch: string): Promise<BranchPullRequest | null> {
+    const found = await this.repository<Record<"open" | "latest", { nodes: BranchNode[] }>>(remote, branchQuery, { head: branch });
     if (!found) throw new Error(`GitHub repository ${remote.repository} was not found.`);
     const node = found.open.nodes[0] ?? found.latest.nodes[0];
     return node ? { number: node.number, url: node.url, title: node.title, state: node.state.toLowerCase() as BranchPullRequest["state"] } : null;

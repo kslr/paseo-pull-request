@@ -1,14 +1,13 @@
 // The pull request panel on the daemon: finds the pull request of the workspace's branch, reads it
 // from GitHub behind a short cache shared by every workspace showing it, and runs its writes.
 // GitHub's JSON is shaped in shape.ts and checked by each output contract before it leaves an RPC.
-import type { RpcInput } from "@getpaseo/plugin";
 import { checksRpc } from "../../shared/pullRequest.ts";
-import type { ActionInput, Check, Detail, PrRef, ResolveResult, updateRpc } from "../../shared/pullRequest.ts";
-import { GitHub, mutationDocument, UnavailableError } from "../github.ts";
-import { redactError } from "../process.ts";
+import type { ActionInput, Check, Detail, PrRef, ResolveResult, UpdateInput } from "../../shared/pullRequest.ts";
+import { GitHub, UnavailableError } from "../github.ts";
+import { redactError, runCommand } from "../process.ts";
 import type { Runner } from "../process.ts";
+import { ReadCache } from "../readCache.ts";
 import * as q from "./queries.ts";
-import { ReadCache } from "./readCache.ts";
 import { toCheck, toDetail } from "./shape.ts";
 import { actionMutation, updateMutation } from "./writes.ts";
 import type { Mutation } from "./writes.ts";
@@ -18,26 +17,23 @@ const CHECKS_TTL_MS = 10_000;
 const DETAIL_TTL_MS = 30_000;
 
 // A pull request on the GitHub host of its workspace's remote.
-interface Located { ref: PrRef; host: string }
+interface Located { ref: PrRef; github: GitHub; host: string }
 type Found<T extends { pullRequest: unknown }> = T & { pullRequest: NonNullable<T["pullRequest"]> };
 const cacheGroup = ({ ref, host }: Located) => `${host}/${ref.repository}#${ref.number}`;
 
-async function currentBranch(run: Runner, directory: string) {
-  const head = (await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: directory })).stdout.trim();
-  return head === "HEAD" ? null : head;
-}
-
 export class PullRequestService {
-  readonly github: GitHub;
+  readonly run: Runner;
   private reads = new ReadCache();
-  constructor(github = new GitHub()) { this.github = github; }
+  constructor(run: Runner = runCommand) { this.run = run; }
 
   async resolve({ directory }: { directory: string }): Promise<ResolveResult> {
+    const github = new GitHub(directory, this.run);
     try {
-      const remote = await this.github.remote(directory);
-      await this.github.auth(directory, remote.host);
-      const branch = await currentBranch(this.github.run, directory);
-      const found = branch ? await this.github.branchPullRequest(directory, remote, branch) : null;
+      const remote = await github.remote();
+      await github.auth(remote.host);
+      const head = (await this.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: directory })).stdout.trim();
+      const branch = head === "HEAD" ? null : head;
+      const found = branch ? await github.branchPullRequest(remote, branch) : null;
       if (found) return { status: "found", repository: remote.repository, number: found.number };
       return { status: "none", repository: remote.repository, branch };
     } catch (error) {
@@ -69,17 +65,18 @@ export class PullRequestService {
     await this.write(at, actionMutation(input, await this.read<q.WriteRepository>(at, q.writeStateQuery)));
     return ok;
   }
-  async update({ title, body, ...ref }: RpcInput<typeof updateRpc>) {
+  async update({ title, body, ...ref }: UpdateInput) {
     const at = await this.locate(ref);
     await this.write(at, updateMutation(await this.read<q.WriteRepository>(at, q.writeStateQuery), { title, body }));
     return ok;
   }
 
   private async locate(ref: PrRef): Promise<Located> {
-    return { ref, host: (await this.github.remote(ref.directory)).host };
+    const github = new GitHub(ref.directory, this.run);
+    return { ref, github, host: (await github.remote()).host };
   }
-  private async read<T extends { pullRequest: unknown }>({ ref, host }: Located, query: string, variables: Record<string, unknown> = {}): Promise<Found<T>> {
-    const repo = await this.github.repository<T>(ref.directory, host, ref.repository, query, { number: ref.number, ...variables });
+  private async read<T extends { pullRequest: unknown }>({ ref, github, host }: Located, query: string, variables: Record<string, unknown> = {}): Promise<Found<T>> {
+    const repo = await github.repository<T>({ host, repository: ref.repository }, query, { number: ref.number, ...variables });
     if (!repo?.pullRequest) throw new Error(`Pull request #${ref.number} was not found in ${ref.repository}.`);
     return repo as Found<T>;
   }
@@ -87,8 +84,8 @@ export class PullRequestService {
     const at = await this.locate(ref);
     return this.reads.read(cacheGroup(at), name, ttl, () => load(at));
   }
-  private async write(at: Located, { field, input }: Mutation) {
-    await this.github.graphql(at.ref.directory, at.host, mutationDocument(field), { input });
+  private async write(at: Located, { query, variables }: Mutation) {
+    await at.github.graphql(at.host, query, variables);
     this.reads.drop(cacheGroup(at));
   }
   // The head commit's checks, a page at a time; a pull request without commits or checks has none.

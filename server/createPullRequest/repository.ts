@@ -1,7 +1,7 @@
 // A checkout's git commands and the status the Create PR button and a run decide from.
 import type { GitStatus } from "../../shared/createPullRequest.ts";
 import { GitHub } from "../github.ts";
-import { CommandError, runCommand } from "../process.ts";
+import { CommandError, commandFailed, runCommand } from "../process.ts";
 import type { Runner } from "../process.ts";
 
 export interface RepositoryStatus {
@@ -17,7 +17,7 @@ const NOT_A_REPOSITORY: RepositoryStatus = {
   primary: null, defaultRef: null, baseRef: null,
 };
 
-export interface WorkingTree { refName: string | null; unborn: boolean; hasUpstream: boolean; ahead: number; behind: number; hasChanges: boolean }
+interface WorkingTree { refName: string | null; unborn: boolean; hasUpstream: boolean; ahead: number; behind: number; hasChanges: boolean }
 
 // `git status --porcelain=v2 --branch -z`: "# branch.<key> <value>" headers, then a record per
 // changed or untracked path.
@@ -43,7 +43,7 @@ export class GitRepository {
   readonly run: Runner;
   readonly directory: string;
   readonly github: GitHub;
-  constructor(directory: string, run: Runner = runCommand) { this.directory = directory; this.run = run; this.github = new GitHub(run); }
+  constructor(directory: string, run: Runner = runCommand) { this.directory = directory; this.run = run; this.github = new GitHub(directory, run); }
   async git(args: string[]) { return (await this.run("git", args, { cwd: this.directory })).stdout.trim(); }
   // null when git exits with 1, as it does for a missing ref.
   async optional(args: string[]) {
@@ -83,14 +83,14 @@ export class GitRepository {
     const remoteHead = await this.optional(["symbolic-ref", "--quiet", `${prefix}HEAD`]);
     if (remoteHead) return remoteHead.slice(prefix.length);
     // Named explicitly: gh on its own would prefer a remote named upstream.
-    const github = (await this.github.remotes(this.directory)).find(remote => remote.name === primary);
+    const github = (await this.github.remotes()).find(remote => remote.name === primary);
     if (!github) return null;
     try {
       const { stdout } = await this.run("gh", ["repo", "view", `${github.host}/${github.repository}`, "--json", "defaultBranchRef"], { cwd: this.directory });
       return (JSON.parse(stdout) as { defaultBranchRef?: { name?: string } | null }).defaultBranchRef?.name ?? null;
     } catch (error) {
       // Offline, or gh missing or signed out: the status goes on without it. A cancelled run does not.
-      if (error instanceof CommandError && error.code !== "ABORT_ERR") return null;
+      if (commandFailed(error)) return null;
       throw error;
     }
   }

@@ -1,5 +1,5 @@
-// Reads grouped by pull request: each kept for its time to live, shared while in flight, and dropped
-// together. A read in flight when its group is dropped settles into the dropped group, so it cannot
+// Reads grouped by what they read, a pull request or a checkout: each kept for its time to live,
+// shared while in flight, and dropped together. A read in flight when its group is dropped settles into the dropped group, so it cannot
 // bring old data back.
 interface Entry { value: Promise<unknown>; expires: number }
 

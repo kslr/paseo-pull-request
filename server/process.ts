@@ -8,6 +8,8 @@ export class CommandError extends Error {
   code: string | number | undefined;
   constructor(message: string, code?: string | number) { super(redactError(message)); this.code = code; }
 }
+// A command that ran and failed, rather than one cancelled with its run.
+export const commandFailed = (error: unknown) => error instanceof CommandError && error.code !== "ABORT_ERR";
 export function redactError(message: string) {
   return message.replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/g, "[redacted]")
     .replace(/(authorization:\s*(?:bearer|token)\s+)\S+/gi, "$1[redacted]")
