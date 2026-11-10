@@ -1,134 +1,105 @@
-// The pull request panel on the daemon: finds the pull request of the workspace's branch, reads it from GitHub
-// behind a short cache, and runs its state changes. Untrusted GitHub JSON is shaped here and
-// validated by each output contract; no raw object escapes an RPC.
+// The pull request panel on the daemon: finds the pull request of the workspace's branch, reads it
+// from GitHub behind a short cache shared by every workspace showing it, and runs its writes.
+// GitHub's JSON is shaped in shape.ts and checked by each output contract before it leaves an RPC.
 import type { RpcInput } from "@getpaseo/plugin";
-import * as c from "../../shared/pullRequest.ts";
-import type { Action, ActionInput, Check, CheckStatus, Detail, PrRef, ResolveResult } from "../../shared/pullRequest.ts";
-import { GitHub, UnavailableError } from "../github.ts";
+import { checksRpc } from "../../shared/pullRequest.ts";
+import type { ActionInput, Check, Detail, PrRef, ResolveResult, updateRpc } from "../../shared/pullRequest.ts";
+import { GitHub, mutationDocument, UnavailableError } from "../github.ts";
 import { redactError } from "../process.ts";
+import type { Runner } from "../process.ts";
 import * as q from "./queries.ts";
+import { ReadCache } from "./readCache.ts";
+import { toCheck, toDetail } from "./shape.ts";
+import { actionMutation, updateMutation } from "./writes.ts";
+import type { Mutation } from "./writes.ts";
 
-type Raw = Record<string, any>;
 const ok = { ok: true as const };
+const CHECKS_TTL_MS = 10_000;
+const DETAIL_TTL_MS = 30_000;
 
-// GitHub's CheckRun conclusion or status, or StatusContext state; anything else is neutral.
-const CHECK_STATUSES: Record<string, CheckStatus> = {
-  SUCCESS: "success", FAILURE: "failure", ERROR: "failure", TIMED_OUT: "failure", STARTUP_FAILURE: "failure",
-  ACTION_REQUIRED: "action-required", SKIPPED: "skipped", NEUTRAL: "neutral", CANCELLED: "cancelled",
-  PENDING: "pending", EXPECTED: "pending", QUEUED: "pending", IN_PROGRESS: "pending", WAITING: "pending", REQUESTED: "pending", PENDING_DEPLOYMENT: "pending",
-};
-const canWrite = (permission: string | null | undefined) => ["WRITE", "MAINTAIN", "ADMIN"].includes(permission ?? "");
-const STATE_MUTATIONS = { "disable-auto-merge": "disablePullRequestAutoMerge", ready: "markPullRequestReadyForReview", draft: "convertPullRequestToDraft", close: "closePullRequest", reopen: "reopenPullRequest" } as const;
+// A pull request on the GitHub host of its workspace's remote.
+interface Located { ref: PrRef; host: string }
+type Found<T extends { pullRequest: unknown }> = T & { pullRequest: NonNullable<T["pullRequest"]> };
+const cacheGroup = ({ ref, host }: Located) => `${host}/${ref.repository}#${ref.number}`;
+
+async function currentBranch(run: Runner, directory: string) {
+  const head = (await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: directory })).stdout.trim();
+  return head === "HEAD" ? null : head;
+}
 
 export class PullRequestService {
-  private cache = new Map<string, { expires: number; value: unknown }>();
-  private pending = new Map<string, Promise<unknown>>();
   readonly github: GitHub;
+  private reads = new ReadCache();
   constructor(github = new GitHub()) { this.github = github; }
-
-  private async host(ref: PrRef) { return (await this.github.remote(ref.directory)).host; }
-  private async query(ref: PrRef, query: string, extra: Record<string, unknown> = {}): Promise<Raw> {
-    const [owner, name] = ref.repository.split("/");
-    const data = await this.github.graphql(ref.directory, await this.host(ref), query, { owner, name, number: ref.number, ...extra });
-    if (!data.repository?.pullRequest) throw new Error(`Pull request #${ref.number} was not found in ${ref.repository}.`);
-    return data.repository;
-  }
-  private async mutate(ref: PrRef, field: string, input: Record<string, unknown>) {
-    const type = `${field[0].toUpperCase()}${field.slice(1)}Input`;
-    await this.github.graphql(ref.directory, await this.host(ref), `mutation($input:${type}!) { ${field}(input:$input) { clientMutationId } }`, { input });
-    await this.refresh(ref);
-  }
-  // Reads are cached per pull request, shared by every workspace showing it.
-  private async key(ref: PrRef) { return `${await this.host(ref)}/${ref.repository}#${ref.number}:`; }
-  private async cached<T>(ref: PrRef, name: string, ttl: number, read: () => Promise<T>): Promise<T> {
-    const key = `${await this.key(ref)}${name}`;
-    const entry = this.cache.get(key);
-    if (entry && entry.expires > Date.now()) return entry.value as T;
-    const pending = this.pending.get(key);
-    if (pending) return pending as Promise<T>;
-    const task = read().then(value => {
-      if (this.pending.get(key) === task) this.cache.set(key, { expires: Date.now() + ttl, value });
-      return value;
-    }).finally(() => { if (this.pending.get(key) === task) this.pending.delete(key); });
-    this.pending.set(key, task);
-    return task;
-  }
-  async refresh(ref: PrRef) {
-    const prefix = await this.key(ref);
-    for (const map of [this.cache, this.pending]) for (const key of map.keys()) if (key.startsWith(prefix)) map.delete(key);
-    return ok;
-  }
 
   async resolve({ directory }: { directory: string }): Promise<ResolveResult> {
     try {
       const remote = await this.github.remote(directory);
       await this.github.auth(directory, remote.host);
-      const head = (await this.github.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: directory })).stdout.trim();
-      const branch = head === "HEAD" ? null : head;
-      const pr = branch ? await this.github.branchPullRequest(directory, remote, branch) : null;
-      return pr ? { status: "found", repository: remote.repository, number: pr.number } : { status: "none", repository: remote.repository, branch };
+      const branch = await currentBranch(this.github.run, directory);
+      const found = branch ? await this.github.branchPullRequest(directory, remote, branch) : null;
+      if (found) return { status: "found", repository: remote.repository, number: found.number };
+      return { status: "none", repository: remote.repository, branch };
     } catch (error) {
       return { status: "unavailable", reason: error instanceof UnavailableError ? error.reason : "error", message: redactError((error as Error).message) };
     }
   }
-  async checks(ref: PrRef) {
-    return this.cached(ref, "checks", 10_000, async () => {
+
+  checks(ref: PrRef): Promise<{ checks: Check[] }> {
+    return this.cached(ref, "checks", CHECKS_TTL_MS, async at => {
       const checks: Check[] = [];
-      let after: string | null = null;
-      do {
-        const contexts: Raw | undefined = (await this.query(ref, q.checksQuery, { after })).pullRequest.commits.nodes[0]?.commit.statusCheckRollup?.contexts;
-        if (!contexts) break;
-        checks.push(...contexts.nodes.map((v: Raw) => ({
-          name: v.name ?? v.context, status: CHECK_STATUSES[(v.conclusion || v.status || v.state || "PENDING").toUpperCase()] ?? "neutral",
-          description: v.description ?? null, url: v.detailsUrl ?? v.targetUrl ?? null, required: v.isRequired ?? null, workflowName: v.checkSuite?.workflowRun?.workflow?.name ?? null,
-        })));
-        after = contexts.pageInfo.hasNextPage ? contexts.pageInfo.endCursor : null;
-      } while (after);
-      return c.checksRpc.output.parse({ checks });
+      for await (const nodes of this.rollupPages(at)) checks.push(...nodes.map(toCheck));
+      return checksRpc.output.parse({ checks });
     });
   }
-  async detail(ref: PrRef): Promise<Detail> {
-    return this.cached(ref, "detail", 30_000, async () => {
-      const repo = await this.query(ref, q.detailQuery), pr = repo.pullRequest;
-      const write = canWrite(repo.viewerPermission), update = pr.viewerCanUpdate === true;
-      const canMergeNow = pr.state === "OPEN" && !pr.isDraft && pr.mergeable === "MERGEABLE" && ["CLEAN", "HAS_HOOKS", "UNSTABLE"].includes(pr.mergeStateStatus);
-      const allowed: Record<Action, boolean> = {
-        merge: write, "enable-auto-merge": write && repo.autoMergeAllowed && !canMergeNow, "disable-auto-merge": write,
-        ready: update, draft: update, close: update, reopen: update,
-        "delete-branch": !pr.isCrossRepository && !!pr.headRef && pr.headRefName !== repo.defaultBranchRef?.name && canWrite(pr.headRepository?.viewerPermission),
-      };
-      return c.detailSchema.parse({
-        repository: ref.repository, number: pr.number, url: pr.url, title: pr.title, body: pr.body, author: pr.author ? { login: pr.author.login } : null,
-        state: pr.state.toLowerCase(), isDraft: pr.isDraft, mergeability: pr.mergeable.toLowerCase(), mergeStateStatus: pr.mergeStateStatus ?? null,
-        reviewDecision: pr.reviewDecision?.toLowerCase().replaceAll("_", "-") ?? null,
-        additions: pr.additions, deletions: pr.deletions, changedFiles: pr.changedFiles, headBranch: pr.headRefName, baseBranch: pr.baseRefName,
-        updatedAt: pr.updatedAt, mergedAt: pr.mergedAt, closedAt: pr.closedAt,
-        mergeCapabilities: { merge: repo.mergeCommitAllowed, squash: repo.squashMergeAllowed, rebase: repo.rebaseMergeAllowed },
-        autoMergeAllowed: repo.autoMergeAllowed, autoMergeEnabled: !!pr.autoMergeRequest, autoMergeMethod: pr.autoMergeRequest?.mergeMethod.toLowerCase() ?? null,
-        permissions: { actions: c.actionSchema.options.filter(action => allowed[action]), editChangeRequest: update },
-      });
+  detail(ref: PrRef): Promise<Detail> {
+    return this.cached(ref, "detail", DETAIL_TTL_MS, async at => {
+      const repo = await this.read<q.DetailRepository>(at, q.detailQuery);
+      return toDetail(ref.repository, repo, repo.pullRequest);
     });
+  }
+  async refresh(ref: PrRef) {
+    this.reads.drop(cacheGroup(await this.locate(ref)));
+    return ok;
   }
 
+  // Each write plans its mutation from a fresh read, never from the cache.
   async action(input: ActionInput) {
-    const repo = await this.query(input, q.writeStateQuery), pr = repo.pullRequest;
-    if (input.action === "merge" || input.action === "enable-auto-merge") {
-      // A merge queue only takes merges through auto-merge. A direct merge pins the reviewed head.
-      const auto = input.action === "enable-auto-merge" || pr.isMergeQueueEnabled === true;
-      await this.mutate(input, auto ? "enablePullRequestAutoMerge" : "mergePullRequest", { pullRequestId: pr.id, mergeMethod: input.mergeMethod.toUpperCase(), ...(auto ? {} : { expectedHeadOid: pr.headRefOid }) });
-    } else if (input.action === "delete-branch") {
-      if (pr.isCrossRepository) throw new Error("Branches from fork pull requests cannot be deleted here.");
-      if (pr.state === "OPEN") throw new Error("Close or merge the pull request before deleting its branch.");
-      if (pr.headRefName === repo.defaultBranchRef?.name) throw new Error("The repository's default branch cannot be deleted.");
-      if (!pr.headRef) throw new Error("The pull request branch no longer exists.");
-      if (pr.headRef.target.oid !== pr.headRefOid) throw new Error("The branch has new commits since this pull request. It cannot be deleted here.");
-      await this.mutate(input, "updateRefs", { repositoryId: repo.id, refUpdates: [{ name: `refs/heads/${pr.headRefName}`, beforeOid: pr.headRef.target.oid, afterOid: "0".repeat(40) }] });
-    } else await this.mutate(input, STATE_MUTATIONS[input.action], { pullRequestId: pr.id });
+    const at = await this.locate(input);
+    await this.write(at, actionMutation(input, await this.read<q.WriteRepository>(at, q.writeStateQuery)));
     return ok;
   }
-  async update({ title, body, ...ref }: RpcInput<typeof c.updateRpc>) {
-    const { pullRequest } = await this.query(ref, q.writeStateQuery);
-    await this.mutate(ref, "updatePullRequest", { pullRequestId: pullRequest.id, title, body });
+  async update({ title, body, ...ref }: RpcInput<typeof updateRpc>) {
+    const at = await this.locate(ref);
+    await this.write(at, updateMutation(await this.read<q.WriteRepository>(at, q.writeStateQuery), { title, body }));
     return ok;
+  }
+
+  private async locate(ref: PrRef): Promise<Located> {
+    return { ref, host: (await this.github.remote(ref.directory)).host };
+  }
+  private async read<T extends { pullRequest: unknown }>({ ref, host }: Located, query: string, variables: Record<string, unknown> = {}): Promise<Found<T>> {
+    const repo = await this.github.repository<T>(ref.directory, host, ref.repository, query, { number: ref.number, ...variables });
+    if (!repo?.pullRequest) throw new Error(`Pull request #${ref.number} was not found in ${ref.repository}.`);
+    return repo as Found<T>;
+  }
+  private async cached<T>(ref: PrRef, name: string, ttl: number, load: (at: Located) => Promise<T>): Promise<T> {
+    const at = await this.locate(ref);
+    return this.reads.read(cacheGroup(at), name, ttl, () => load(at));
+  }
+  private async write(at: Located, { field, input }: Mutation) {
+    await this.github.graphql(at.ref.directory, at.host, mutationDocument(field), { input });
+    this.reads.drop(cacheGroup(at));
+  }
+  // The head commit's checks, a page at a time; a pull request without commits or checks has none.
+  private async *rollupPages(at: Located) {
+    let after: string | null = null;
+    do {
+      const repo: Found<q.ChecksRepository> = await this.read<q.ChecksRepository>(at, q.checksQuery, { after });
+      const page = repo.pullRequest.commits.nodes[0]?.commit.statusCheckRollup?.contexts;
+      if (!page) return;
+      yield page.nodes;
+      after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+    } while (after);
   }
 }

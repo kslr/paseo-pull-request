@@ -1,32 +1,25 @@
-// Names the feature branch a run cuts from the default branch: the generated name as a valid ref
-// under feature/, made unique among the existing branches.
-function sanitizeBranchFragment(raw: string): string {
-  const fragment = raw
-    .trim()
-    .toLowerCase()
-    .replace(/['"`]/g, "")
-    .replace(/^[./\s_-]+|[./\s_-]+$/g, "")
-    .replace(/[^a-z0-9/_-]+/g, "-")
-    .replace(/\/+/g, "/")
-    .replace(/-+/g, "-")
-    .replace(/^[./_-]+|[./_-]+$/g, "")
-    .slice(0, 64)
-    .replace(/[./_-]+$/g, "");
-  return fragment || "update";
+// Names the feature branch a run cuts from the default branch: the generated name as a valid ref,
+// under feature/ unless it names its own prefix, made unique among the existing branches.
+const MAX_SLUG = 64;
+const trimSeparators = (value: string) => value.replace(/^[/_-]+|[/_-]+$/g, "");
+
+// Lowercase letters, digits, "_", "-" and single slashes; anything else becomes one hyphen.
+function slug(raw: string) {
+  const collapsed = raw.toLowerCase().replace(/['"`]/g, "").replace(/[^a-z0-9/_-]+/g, "-").replace(/\/{2,}/g, "/").replace(/-{2,}/g, "-");
+  return trimSeparators(trimSeparators(collapsed).slice(0, MAX_SLUG)) || "update";
 }
 
 export function featureBranchName(existingBranches: readonly string[], preferred = ""): string {
-  const sanitized = sanitizeBranchFragment(preferred.trim() || "update");
-  const parts = (sanitized.includes("/") ? sanitized : `feature/${sanitized}`).split("/");
-  const existing = existingBranches.map(name => name.toLowerCase());
-  const taken = new Set(existing);
-  let resolved = "";
-  // A name can neither be a branch already nor sit where one is a directory, at any level.
-  for (const [index, part] of parts.entries()) {
-    const base = resolved ? `${resolved}/${part}` : part;
+  // Ref names are compared as case-insensitive file systems would store them.
+  const existing = existingBranches.map(name => name.toLowerCase()), taken = new Set(existing);
+  const name = slug(preferred);
+  const segments = name.includes("/") ? name.split("/") : ["feature", name];
+  // Every level must be free of a branch of that name; the last must not be a directory of branches.
+  return segments.reduce((parent, segment, index) => {
+    const isLeaf = index === segments.length - 1, base = parent ? `${parent}/${segment}` : segment;
+    const free = (candidate: string) => !taken.has(candidate) && !(isLeaf && existing.some(branch => branch.startsWith(`${candidate}/`)));
     let candidate = base;
-    for (let suffix = 2; taken.has(candidate) || (index === parts.length - 1 && existing.some(name => name.startsWith(`${candidate}/`))); suffix++) candidate = `${base}-${suffix}`;
-    resolved = candidate;
-  }
-  return resolved;
+    for (let suffix = 2; !free(candidate); suffix++) candidate = `${base}-${suffix}`;
+    return candidate;
+  }, "");
 }

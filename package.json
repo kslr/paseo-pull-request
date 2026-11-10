@@ -17,7 +17,6 @@
     "LICENSE",
     "README.md",
     "OVERVIEW.md",
-    "THIRD_PARTY_NOTICES.md",
     "index.client.tsx",
     "index.server.ts",
     "client/",

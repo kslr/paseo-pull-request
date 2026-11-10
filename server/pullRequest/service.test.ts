@@ -63,6 +63,14 @@ test("reads are cached until refresh", async () => {
   await service.refresh(ref); await service.checks(ref); assert.equal(count, 2);
 });
 
+test("a failed read is not cached", async () => {
+  let reads = 0;
+  const { service } = mock(() => ++reads === 1 ? { errors: [{ message: "Something went wrong" }] } : { data: { repository: { pullRequest: success("CI") } } });
+  await assert.rejects(service.checks(ref), /Something went wrong/);
+  assert.equal((await service.checks(ref)).checks[0].name, "CI");
+  await service.checks(ref); assert.equal(reads, 2);
+});
+
 test("refresh prevents an in-flight old read from repopulating the cache", async () => {
   let unblock!: (value: { stdout: string; stderr: string }) => void;
   let reads = 0;

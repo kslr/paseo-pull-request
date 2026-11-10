@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { fakePaseo } from "./fakePaseo.ts";
 import { CreatePullRequestService } from "./service.ts";
 import { featureBranchName } from "./branchName.ts";
+import { parseWorkingTree } from "./repository.ts";
+import { parseCreatedPullRequest } from "./run.ts";
 import { CommandError, runCommand } from "../process.ts";
 import type { Runner, CommandOptions } from "../process.ts";
 import { gitStatusSchema, createPullRequestRunSchema } from "../../shared/createPullRequest.ts";
@@ -246,6 +248,18 @@ test("feature branch names avoid existing branches and directory conflicts", () 
   assert.equal(featureBranchName([]), "feature/update");
   assert.equal(featureBranchName(["FEATURE"], "hello"), "feature-2/hello");
   assert.equal(featureBranchName(["feature/hello/child", "feature/hello-2"], "hello"), "feature/hello-3");
+});
+
+test("porcelain status headers and records give the branch, its upstream counts and whether anything changed", () => {
+  const header = (...lines: string[]) => lines.map(line => `# ${line}`).join("\0");
+  assert.deepEqual(parseWorkingTree(`${header("branch.oid abc", "branch.head feature", "branch.upstream origin/feature", "branch.ab +2 -1")}\0`), { refName: "feature", unborn: false, hasUpstream: true, ahead: 2, behind: 1, hasChanges: false });
+  assert.deepEqual(parseWorkingTree(`${header("branch.oid (initial)", "branch.head main")}\0? new.txt\0`), { refName: "main", unborn: true, hasUpstream: false, ahead: 0, behind: 0, hasChanges: true });
+  assert.equal(parseWorkingTree(header("branch.oid abc", "branch.head (detached)")).refName, null);
+});
+
+test("the created pull request is read from gh's last line", () => {
+  assert.deepEqual(parseCreatedPullRequest("Creating pull request for feature into main\n\nhttps://github.com/owner/repo/pull/8\n"), { number: 8, url: "https://github.com/owner/repo/pull/8" });
+  assert.throws(() => parseCreatedPullRequest("Warning: something\n"), /did not return a pull request URL: Warning: something$/);
 });
 
 // Another clone moves the remote's main on, leaving this checkout's main and origin/main behind.
