@@ -7,6 +7,7 @@ const nullableText = text.nullable();
 const count = z.number().int().nonnegative();
 const prNumber = z.number().int().positive();
 export const repositorySchema = text.regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).refine(v => v.split("/").every(p => p !== "." && p !== ".."));
+export const prStateSchema = z.enum(["open", "closed", "merged"]);
 const prRefSchema = z.object({ directory: text.min(1), repository: repositorySchema, number: prNumber });
 const checkStatusSchema = z.enum(["pending", "action-required", "success", "failure", "skipped", "neutral", "cancelled"]);
 const checkSchema = z.object({ name: text, status: checkStatusSchema, description: nullableText, url: nullableText, required: z.boolean().nullable(), workflowName: nullableText });
@@ -22,7 +23,7 @@ const resolveResultSchema = z.discriminatedUnion("status", [
 ]);
 export const detailSchema = z.object({
   repository: repositorySchema, number: prNumber, url: text, title: text, body: text,
-  author: z.object({ login: text }).nullable(), state: z.enum(["open", "closed", "merged"]), isDraft: z.boolean(),
+  author: z.object({ login: text }).nullable(), state: prStateSchema, isDraft: z.boolean(),
   mergeability: z.enum(["mergeable", "conflicting", "unknown"]), mergeStateStatus: nullableText,
   reviewDecision: z.enum(["approved", "changes-requested", "review-required"]).nullable(),
   additions: count, deletions: count, changedFiles: count, headBranch: text, baseBranch: text,
@@ -52,6 +53,7 @@ export type CheckStatus = Check["status"];
 export type MergeMethod = z.infer<typeof mergeMethodSchema>;
 export type Action = z.infer<typeof actionSchema>;
 export type ActionInput = z.infer<typeof actionRpc.input>;
+export type UpdateInput = z.infer<typeof updateRpc.input>;
 export type ActionRequest = z.infer<z.ZodObject<typeof mergeRequest>> | z.infer<z.ZodObject<typeof stateRequest>>;
 export type ResolveResult = z.infer<typeof resolveResultSchema>;
 export type UnavailableReason = z.infer<typeof unavailableReasonSchema>;

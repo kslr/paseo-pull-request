@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { GitHub } from "../github.ts";
 import { PullRequestService } from "./service.ts";
 import type { Runner } from "../process.ts";
 import { CommandError } from "../process.ts";
@@ -42,7 +41,7 @@ function mock(api: (body: any) => unknown) {
     return { stdout: JSON.stringify(api(body)), stderr: "" };
   };
   const mutations = () => calls.filter(call => call.body.query.startsWith("mutation"));
-  return { service: new PullRequestService(new GitHub(runner)), calls, mutations };
+  return { service: new PullRequestService(runner), calls, mutations };
 }
 
 test("resolve finds the branch's pull request and tells missing gh from failed auth", async () => {
@@ -50,7 +49,7 @@ test("resolve finds the branch's pull request and tells missing gh from failed a
   assert.deepEqual(await service.resolve(ref), { status: "found", repository: "owner/repo", number: 5 });
   for (const [code, reason] of [["ENOENT", "gh-missing"], [1, "gh-unauthenticated"]] as const) {
     const runner: Runner = async file => { if (file === "git") return { stdout: remote, stderr: "" }; throw new CommandError("auth failed", code); };
-    const result = await new PullRequestService(new GitHub(runner)).resolve(ref);
+    const result = await new PullRequestService(runner).resolve(ref);
     assert.equal(result.status, "unavailable"); if (result.status === "unavailable") assert.equal(result.reason, reason);
   }
 });
@@ -80,7 +79,7 @@ test("refresh prevents an in-flight old read from repopulating the cache", async
     if (reads === 1) return new Promise(resolve => { unblock = resolve; });
     return { stdout: JSON.stringify({ data: { repository: { pullRequest: success("new") } } }), stderr: "" };
   };
-  const service = new PullRequestService(new GitHub(runner));
+  const service = new PullRequestService(runner);
   const old = service.checks(ref);
   while (!unblock) await new Promise(resolve => setImmediate(resolve));
   await service.refresh(ref);

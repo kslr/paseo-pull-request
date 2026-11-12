@@ -8,11 +8,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import * as c from "../../shared/pullRequest.ts";
-import { defaultChecksOpen, groupChecks, hasPendingChecks, type CheckRow } from "./checks.logic.ts";
+import { defaultChecksOpen, groupChecks, hasPendingChecks } from "./checks.logic.ts";
 import { ChecksSection } from "./checks.tsx";
 import { demoteHeadings } from "./markdown.logic.ts";
 import {
   autoMergeNote,
+  buildFixFailingChecksPrompt,
+  buildResolveConflictsPrompt,
   describeState,
   describeTimestamp,
   formatCount,
@@ -52,8 +54,8 @@ export interface PullRequestDetailProps {
   readonly compact: boolean;
   readonly tab: PluginTab;
   readonly prRef: c.PrRef;
-  readonly onResolveConflicts: (detail: c.Detail) => Promise<void>;
-  readonly onFixFailingChecks: (detail: c.Detail, failing: readonly CheckRow[]) => Promise<void>;
+  // Starts an agent in the workspace on the prompt.
+  readonly handOff: (task: { readonly title: string; readonly prompt: string }) => Promise<void>;
 }
 
 const MORE_ACTIONS: Record<MoreAction, { readonly label: string; readonly icon: string; readonly success: string }> = {
@@ -151,7 +153,7 @@ function ActionNote({ theme, children }: { readonly theme: PluginTheme; readonly
   return <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 17 }}>{children}</Text>;
 }
 
-export function PullRequestDetail({ theme, compact, tab, prRef, onResolveConflicts, onFixFailingChecks }: PullRequestDetailProps) {
+export function PullRequestDetail({ theme, compact, tab, prRef: ref, handOff }: PullRequestDetailProps) {
   const { colors } = theme;
   const toast = useToast();
   const queryClient = useQueryClient();
@@ -160,7 +162,6 @@ export function PullRequestDetail({ theme, compact, tab, prRef, onResolveConflic
   const actionRpc = useRpc(c.actionRpc);
   const updateRpc = useRpc(c.updateRpc);
   const refreshRpc = useRpc(c.refreshRpc);
-  const ref = { directory: prRef.directory, repository: prRef.repository, number: prRef.number };
   const detailQuery = useQuery({ queryKey: pullRequestQueryKey(ref.directory, "detail", ref.repository, ref.number), queryFn: () => detailRpc(ref) });
   const checksQuery = useQuery({
     queryKey: pullRequestQueryKey(ref.directory, "checks", ref.repository, ref.number),
@@ -174,8 +175,8 @@ export function PullRequestDetail({ theme, compact, tab, prRef, onResolveConflic
   const [descriptionOpen, setDescriptionOpen] = useState(true);
   // tab.state is read once; later writes are mirrored here.
   const [tabState, setTabState] = useState<TabState>(() => readTabState(tab.state));
-  const handOff = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => void (handOff.current && clearTimeout(handOff.current)), []);
+  const modalHandOff = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => void (modalHandOff.current && clearTimeout(modalHandOff.current)), []);
 
   const detail = detailQuery.data;
   const checks = checksQuery.data?.checks ?? [];
@@ -196,8 +197,8 @@ export function PullRequestDetail({ theme, compact, tab, prRef, onResolveConflic
   // Closes the open modal, then runs `next` once it is gone.
   const closeModalThen = (next: () => void) => {
     setModal(null);
-    if (handOff.current) clearTimeout(handOff.current);
-    handOff.current = setTimeout(next, MODAL_HANDOFF_MS);
+    if (modalHandOff.current) clearTimeout(modalHandOff.current);
+    modalHandOff.current = setTimeout(next, MODAL_HANDOFF_MS);
   };
 
   // One write at a time: its button shows progress and the others wait.
@@ -265,7 +266,9 @@ export function PullRequestDetail({ theme, compact, tab, prRef, onResolveConflic
               label="Fix with agent"
               icon="Bot"
               pending={pending === "resolve-conflicts"}
-              onPress={() => void write("resolve-conflicts", () => onResolveConflicts(detail), "Started an agent to resolve the conflicts")}
+              onPress={() =>
+                void write("resolve-conflicts", () => handOff({ title: `Resolve conflicts in PR #${detail.number}`, prompt: buildResolveConflictsPrompt(detail) }), "Started an agent to resolve the conflicts")
+              }
             />
             <ActionNote theme={theme}>Merging is unavailable until the conflicts are resolved</ActionNote>
           </>
@@ -355,7 +358,11 @@ export function PullRequestDetail({ theme, compact, tab, prRef, onResolveConflic
           onToggle={() => saveTabState({ checksOpen: !checksOpen })}
           fixWithAgent={
             canFixChecks
-              ? { pending: pending === "fix-checks", onPress: () => void write("fix-checks", () => onFixFailingChecks(detail, failing), "Started an agent to fix the failing checks") }
+              ? {
+                  pending: pending === "fix-checks",
+                  onPress: () =>
+                    void write("fix-checks", () => handOff({ title: `Fix failing checks in PR #${detail.number}`, prompt: buildFixFailingChecksPrompt(detail, failing) }), "Started an agent to fix the failing checks"),
+                }
               : null
           }
         />

@@ -35,7 +35,7 @@ export interface CheckRunNode {
   name: string; status?: string; conclusion?: Nullable<string>; detailsUrl?: Nullable<string>; isRequired?: Nullable<boolean>;
   checkSuite?: Nullable<{ workflowRun: Nullable<{ workflow: Nullable<{ name: string }> }> }>;
 }
-export interface RollupPage { pageInfo: { hasNextPage: boolean; endCursor: Nullable<string> }; nodes: (StatusContextNode | CheckRunNode)[] }
+interface RollupPage { pageInfo: { hasNextPage: boolean; endCursor: Nullable<string> }; nodes: (StatusContextNode | CheckRunNode)[] }
 export interface ChecksRepository { pullRequest: Nullable<{ commits: { nodes: { commit: { statusCheckRollup: Nullable<{ contexts: RollupPage }> } }[] } }> }
 const rollupNode = [
   "... on StatusContext { context state targetUrl description isRequired(pullRequestNumber:$number) }",

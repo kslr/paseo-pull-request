@@ -1,23 +1,24 @@
 // A checkout's git commands and the status the Create PR button and a run decide from.
 import type { GitStatus } from "../../shared/createPullRequest.ts";
 import { GitHub } from "../github.ts";
-import { CommandError, runCommand } from "../process.ts";
+import type { Remote } from "../github.ts";
+import { CommandError, commandFailed, runCommand } from "../process.ts";
 import type { Runner } from "../process.ts";
 
 export interface RepositoryStatus {
   status: Omit<GitStatus, "pr">;
-  // The remote pushes go to: origin, else the first one.
-  primary: string | null;
+  // The remote the default branch comes from: origin, else the first one.
+  baseRemote: string | null;
   defaultRef: string | null;
-  // Where the default branch is read from: the primary remote's copy, else the local branch.
+  // Where the default branch is read from: the base remote's copy, else the local branch.
   baseRef: string | null;
 }
 const NOT_A_REPOSITORY: RepositoryStatus = {
-  status: { isRepo: false, hasPrimaryRemote: false, isDefaultRef: false, refName: null, hasWorkingTreeChanges: false, hasUpstream: false, aheadCount: 0, behindCount: 0, aheadOfDefaultCount: null },
-  primary: null, defaultRef: null, baseRef: null,
+  status: { isRepo: false, hasGitHubRemote: false, isDefaultRef: false, refName: null, hasWorkingTreeChanges: false, hasUpstream: false, aheadCount: 0, behindCount: 0, aheadOfDefaultCount: null },
+  baseRemote: null, defaultRef: null, baseRef: null,
 };
 
-export interface WorkingTree { refName: string | null; unborn: boolean; hasUpstream: boolean; ahead: number; behind: number; hasChanges: boolean }
+interface WorkingTree { refName: string | null; unborn: boolean; hasUpstream: boolean; ahead: number; behind: number; hasChanges: boolean }
 
 // `git status --porcelain=v2 --branch -z`: "# branch.<key> <value>" headers, then a record per
 // changed or untracked path.
@@ -43,7 +44,7 @@ export class GitRepository {
   readonly run: Runner;
   readonly directory: string;
   readonly github: GitHub;
-  constructor(directory: string, run: Runner = runCommand) { this.directory = directory; this.run = run; this.github = new GitHub(run); }
+  constructor(directory: string, run: Runner = runCommand) { this.directory = directory; this.run = run; this.github = new GitHub(directory, run); }
   async git(args: string[]) { return (await this.run("git", args, { cwd: this.directory })).stdout.trim(); }
   // null when git exits with 1, as it does for a missing ref.
   async optional(args: string[]) {
@@ -61,36 +62,37 @@ export class GitRepository {
     if (raw === null) return NOT_A_REPOSITORY;
     const tree = parseWorkingTree(raw);
     const remotes = (await this.git(["remote"])).split("\n").filter(Boolean);
-    const primary = remotes.includes("origin") ? "origin" : remotes[0] ?? null;
-    const defaultRef = primary ? await this.defaultBranch(primary) : null;
+    const github = await this.github.remotes();
+    const baseRemote = remotes.includes("origin") ? "origin" : remotes[0] ?? null;
+    const defaultRef = baseRemote ? await this.defaultBranch(baseRemote, github) : null;
     // Without a known default branch, the usual names stand in for it.
     const isDefaultRef = tree.refName !== null && (defaultRef === null ? ["main", "master"].includes(tree.refName) : tree.refName === defaultRef);
-    const baseRef = defaultRef ? await this.firstRef([...(primary ? [`refs/remotes/${primary}/${defaultRef}`] : []), `refs/heads/${defaultRef}`]) : null;
+    const baseRef = defaultRef ? await this.firstRef([...(baseRemote ? [`refs/remotes/${baseRemote}/${defaultRef}`] : []), `refs/heads/${defaultRef}`]) : null;
     const aheadOfDefaultCount = isDefaultRef ? 0 : baseRef && !tree.unborn ? Number(await this.git(["rev-list", "--count", `${baseRef}..HEAD`])) : null;
     return {
       status: {
-        isRepo: true, hasPrimaryRemote: remotes.includes("origin"), isDefaultRef, refName: tree.refName, hasWorkingTreeChanges: tree.hasChanges,
+        isRepo: true, hasGitHubRemote: github.length > 0, isDefaultRef, refName: tree.refName, hasWorkingTreeChanges: tree.hasChanges,
         // Without an upstream, everything ahead of the default branch is still to push.
         hasUpstream: tree.hasUpstream, aheadCount: tree.hasUpstream ? tree.ahead : aheadOfDefaultCount ?? 0, behindCount: tree.behind, aheadOfDefaultCount,
       },
-      primary, defaultRef, baseRef,
+      baseRemote, defaultRef, baseRef,
     };
   }
 
-  // The remote's HEAD as last fetched, else what GitHub says for the primary remote's repository.
-  private async defaultBranch(primary: string): Promise<string | null> {
-    const prefix = `refs/remotes/${primary}/`;
+  // The remote's HEAD as last fetched, else what GitHub says for the remote's repository.
+  private async defaultBranch(remote: string, github: Remote[]): Promise<string | null> {
+    const prefix = `refs/remotes/${remote}/`;
     const remoteHead = await this.optional(["symbolic-ref", "--quiet", `${prefix}HEAD`]);
     if (remoteHead) return remoteHead.slice(prefix.length);
     // Named explicitly: gh on its own would prefer a remote named upstream.
-    const github = (await this.github.remotes(this.directory)).find(remote => remote.name === primary);
-    if (!github) return null;
+    const repository = github.find(candidate => candidate.name === remote);
+    if (!repository) return null;
     try {
-      const { stdout } = await this.run("gh", ["repo", "view", `${github.host}/${github.repository}`, "--json", "defaultBranchRef"], { cwd: this.directory });
+      const { stdout } = await this.run("gh", ["repo", "view", `${repository.host}/${repository.repository}`, "--json", "defaultBranchRef"], { cwd: this.directory });
       return (JSON.parse(stdout) as { defaultBranchRef?: { name?: string } | null }).defaultBranchRef?.name ?? null;
     } catch (error) {
       // Offline, or gh missing or signed out: the status goes on without it. A cancelled run does not.
-      if (error instanceof CommandError && error.code !== "ABORT_ERR") return null;
+      if (commandFailed(error)) return null;
       throw error;
     }
   }

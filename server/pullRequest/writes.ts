@@ -3,9 +3,15 @@
 import type { ActionInput, MergeMethod } from "../../shared/pullRequest.ts";
 import type { WriteRepository } from "./queries.ts";
 
-export interface Mutation { field: string; input: Record<string, unknown> }
-export type WriteTarget = WriteRepository & { pullRequest: NonNullable<WriteRepository["pullRequest"]> };
+type WriteTarget = WriteRepository & { pullRequest: NonNullable<WriteRepository["pullRequest"]> };
 type WritablePullRequest = WriteTarget["pullRequest"];
+export interface Mutation { query: string; variables: { input: Record<string, unknown> } }
+
+// A mutation taking GitHub's conventional single `input` argument of type <Field>Input.
+const mutation = (field: string, input: Record<string, unknown>): Mutation => ({
+  query: `mutation($input:${field[0].toUpperCase()}${field.slice(1)}Input!) { ${field}(input:$input) { clientMutationId } }`,
+  variables: { input },
+});
 
 const STATE_MUTATIONS = {
   "disable-auto-merge": "disablePullRequestAutoMerge", ready: "markPullRequestReadyForReview", draft: "convertPullRequestToDraft",
@@ -17,9 +23,9 @@ const DELETED = "0".repeat(40);
 function merge(pr: WritablePullRequest, viaAutoMerge: boolean, method: MergeMethod): Mutation {
   const input = { pullRequestId: pr.id, mergeMethod: method.toUpperCase() };
   // A merge queue takes merges only through auto-merge.
-  if (viaAutoMerge || pr.isMergeQueueEnabled === true) return { field: "enablePullRequestAutoMerge", input };
+  if (viaAutoMerge || pr.isMergeQueueEnabled === true) return mutation("enablePullRequestAutoMerge", input);
   // GitHub refuses the merge if the head moved after the viewer last saw it.
-  return { field: "mergePullRequest", input: { ...input, expectedHeadOid: pr.headRefOid } };
+  return mutation("mergePullRequest", { ...input, expectedHeadOid: pr.headRefOid });
 }
 
 // Only this pull request's own branch, once the pull request is done with it, and only while it
@@ -32,7 +38,7 @@ function deleteBranch({ id, defaultBranchRef, pullRequest: pr }: WriteTarget): M
   const tip = pr.headRef.target.oid;
   if (tip !== pr.headRefOid) throw new Error("The branch has new commits since this pull request. It cannot be deleted here.");
   // beforeOid makes the deletion fail if the branch moves before GitHub applies it.
-  return { field: "updateRefs", input: { repositoryId: id, refUpdates: [{ name: `refs/heads/${pr.headRefName}`, beforeOid: tip, afterOid: DELETED }] } };
+  return mutation("updateRefs", { repositoryId: id, refUpdates: [{ name: `refs/heads/${pr.headRefName}`, beforeOid: tip, afterOid: DELETED }] });
 }
 
 export function actionMutation(request: ActionInput, target: WriteTarget): Mutation {
@@ -40,7 +46,7 @@ export function actionMutation(request: ActionInput, target: WriteTarget): Mutat
     case "merge": return merge(target.pullRequest, false, request.mergeMethod);
     case "enable-auto-merge": return merge(target.pullRequest, true, request.mergeMethod);
     case "delete-branch": return deleteBranch(target);
-    default: return { field: STATE_MUTATIONS[request.action], input: { pullRequestId: target.pullRequest.id } };
+    default: return mutation(STATE_MUTATIONS[request.action], { pullRequestId: target.pullRequest.id });
   }
 }
 
@@ -49,5 +55,5 @@ export function updateMutation({ pullRequest }: WriteTarget, fields: { title?: s
   const input: Record<string, unknown> = { pullRequestId: pullRequest.id };
   if (fields.title !== undefined) input.title = fields.title;
   if (fields.body !== undefined) input.body = fields.body;
-  return { field: "updatePullRequest", input };
+  return mutation("updatePullRequest", input);
 }

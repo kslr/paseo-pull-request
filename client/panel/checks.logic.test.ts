@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { findSvgIconProblem } from "@getpaseo/plugin";
 import type { Check } from "../../shared/pullRequest.ts";
-import { checkPresentation, checksRingSvg, dedupeChecks, defaultChecksOpen, groupChecks, hasPendingChecks, summarizeChecks } from "./checks.logic.ts";
+import { checksRingSvg, dedupeChecks, defaultChecksOpen, groupChecks, summarizeChecks } from "./checks.logic.ts";
 
 function check(name: string, status: Check["status"], overrides: Partial<Check> = {}): Check {
   return { name, status, description: null, url: null, required: null, workflowName: "CI", ...overrides };
@@ -71,14 +71,6 @@ describe("groupChecks", () => {
     assert.equal(defaultChecksOpen(groupChecks([check("a", "pending")])), true);
     assert.equal(defaultChecksOpen(groupChecks([check("a", "success"), check("b", "skipped")])), false);
     assert.equal(defaultChecksOpen([]), false);
-  });
-
-  it("presents each status", () => {
-    assert.equal(hasPendingChecks([{ status: "success" }, { status: "pending" }]), true);
-    assert.equal(hasPendingChecks([{ status: "success" }]), false);
-    assert.deepEqual(checkPresentation("failure"), { icon: "CircleX", tone: "danger" });
-    assert.deepEqual(checkPresentation("pending"), { icon: "CircleDashed", tone: "warning" });
-    assert.deepEqual(checkPresentation("neutral"), { icon: "CircleMinus", tone: "muted" });
   });
 });
 

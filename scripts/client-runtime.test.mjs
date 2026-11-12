@@ -132,7 +132,7 @@ for (const [version, source] of Object.entries(sources)) {
       let released = 0;
       const workspace = { id: "workspace", projectKind: "git", archivingAt: null, workspaceDirectory: "/repo" };
       const status = {
-        isRepo: true, hasPrimaryRemote: true, isDefaultRef: false, refName: "feature/test",
+        isRepo: true, hasGitHubRemote: true, isDefaultRef: false, refName: "feature/test",
         hasWorkingTreeChanges: true, hasUpstream: true, aheadCount: 0, behindCount: 0, aheadOfDefaultCount: 0, pr: null,
       };
       const client = {

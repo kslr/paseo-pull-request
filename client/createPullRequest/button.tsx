@@ -1,6 +1,6 @@
 // The workspace header's Create PR button: one per Git workspace, tracking that checkout's status and
 // starting and polling the daemon's run (commit, push, create the pull request); see button.logic.ts
-// for when it can. Desktop only.
+// for when it can. On the default branch it commits and pushes there instead. Desktop only.
 import type {
   PluginButton,
   PluginButtonBehavior,
@@ -10,17 +10,19 @@ import type {
 import { Icon, useToast, type ToastApi } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef } from "react";
 import { Platform, View } from "react-native";
-import { createPullRequestRunRpc, gitStatusRpc, startCreatePullRequestRpc, type GitStatus } from "../../shared/createPullRequest.ts";
+import { createPullRequestRunRpc, gitStatusRpc, startCreatePullRequestRpc, type CreatePullRequestAction, type GitStatus } from "../../shared/createPullRequest.ts";
 import { rpcErrorMessage } from "../rpcErrorMessage.ts";
 import {
   CREATE_PULL_REQUEST_LABEL,
   createPullRequestTitle,
   createPullRequestToast,
+  resolveButtonFace,
   resolveCreatePullRequestButton,
   resolveCreatePullRequestProgress,
+  type ButtonFace,
   type RunningCreatePullRequest,
 } from "./button.logic.ts";
-import { emit } from "./events.ts";
+import { pullRequestChanged } from "../pullRequestChanged.ts";
 
 type Workspace = Awaited<ReturnType<PluginClientContext["paseo"]["workspaces"]["list"]>>["entries"][number];
 
@@ -33,21 +35,6 @@ const SUCCESS_TOAST_MS = 10_000;
 // Paseo's toast is a hook. The button's icon, which Paseo renders in the header, lends it to the
 // code below, which runs outside React (an action's result).
 let toast: ToastApi | null = null;
-
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) return reject(signal.reason);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
 
 // Paseo gives plugin header labels the muted colour at its small size (12px by default) and no option
 // to change either; its own git button's label is the foreground colour at the base size (14px). On
@@ -97,8 +84,8 @@ function createPullRequestButton(client: PluginClientContext, workspaceId: strin
   let running: { run: RunningCreatePullRequest | null } | null = null;
 
   const actionBehavior: PluginButtonBehavior = { kind: "action", onPress: () => press() };
-
-  const ButtonIcon = ({ size, color, theme }: PluginButtonIconProps) => {
+  // One component per icon: Paseo draws the one the button currently has.
+  const iconFor = (name: ButtonFace["icon"]) => ({ size, color, theme }: PluginButtonIconProps) => {
     const api = useToast();
     useEffect(() => {
       toast = api;
@@ -111,10 +98,12 @@ function createPullRequestButton(client: PluginClientContext, workspaceId: strin
     // The icon keeps Paseo's colour, as the host's git button does.
     return (
       <View ref={slot}>
-        <Icon name="GitPullRequest" size={size} color={color} />
+        <Icon name={name} size={size} color={color} />
       </View>
     );
   };
+  const buttonIcons = { GitPullRequest: iconFor("GitPullRequest"), Upload: iconFor("Upload") };
+  let face: ButtonFace = { label: CREATE_PULL_REQUEST_LABEL, icon: "GitPullRequest", title: CREATE_PULL_REQUEST_LABEL };
 
   function iconMounted(): () => void {
     icons += 1;
@@ -166,14 +155,18 @@ function createPullRequestButton(client: PluginClientContext, workspaceId: strin
   function publish(): void {
     const state = resolveCreatePullRequestButton(status);
     const patch: Partial<PluginButton> = {};
+    // A run keeps the behavior it started from until it ends.
     if (running !== null) {
       const progress = resolveCreatePullRequestProgress(running.run, Date.now());
-      // The pending press shows Paseo's busy state.
-      Object.assign(patch, { title: createPullRequestTitle(progress.output), label: progress.label });
+      // The pending press shows Paseo's busy state, under the face it was pressed from.
+      Object.assign(patch, { title: createPullRequestTitle(progress.output, face.label), label: progress.label });
     } else {
+      const next = resolveButtonFace(status, state);
+      if (next.icon !== face.icon) Object.assign(patch, { icon: buttonIcons[next.icon] });
+      face = next;
       // Not disabled when there is nothing to do: Paseo fades a disabled plugin button, which reads
       // as broken beside the host's own. The reason shows on hover and, as a toast, on press.
-      Object.assign(patch, { title: createPullRequestTitle(state.kind === "disabled" ? state.hint : null), label: CREATE_PULL_REQUEST_LABEL, disabled: false });
+      Object.assign(patch, { title: face.title, label: face.label, disabled: false });
     }
     registration.update(patch);
   }
@@ -181,17 +174,17 @@ function createPullRequestButton(client: PluginClientContext, workspaceId: strin
   async function press(): Promise<void> {
     const state = resolveCreatePullRequestButton(status);
     if (state.kind === "open_pull_request") return openPullRequest();
-    if (state.kind === "create") await create();
+    if (state.kind === "run") await create(state.action);
     if (state.kind === "disabled") toast?.show(state.hint, { variant: "info" });
   }
 
   function openPullRequest(): void {
     client.openPanel("pull-request", { workspaceId, location: "explorer" });
-    emit({ directory });
+    pullRequestChanged(directory);
   }
 
   // Started and polled. A failure is thrown for Paseo's error toast.
-  async function create(): Promise<void> {
+  async function create(action: CreatePullRequestAction): Promise<void> {
     if (running !== null) return;
     const activeRun: { run: RunningCreatePullRequest | null } = { run: null };
     running = activeRun;
@@ -199,16 +192,17 @@ function createPullRequestButton(client: PluginClientContext, workspaceId: strin
     const signal = abort.signal;
     const runId = newRunId();
     try {
-      let run = await client.rpc(startCreatePullRequestRpc, { directory, runId, workspaceId });
+      let run = await client.rpc(startCreatePullRequestRpc, { directory, runId, workspaceId, action });
       while (run.status === "running") {
         activeRun.run = run;
         publish();
-        await delay(RUN_POLL_INTERVAL_MS, signal);
+        await new Promise((resolve) => setTimeout(resolve, RUN_POLL_INTERVAL_MS));
+        if (signal.aborted) return;
         run = await client.rpc(createPullRequestRunRpc, { directory, runId });
       }
       if (run.status === "failed") throw new Error(run.message);
       toast?.show(createPullRequestToast(run.result), { variant: "success", durationMs: SUCCESS_TOAST_MS });
-      openPullRequest();
+      if (run.result.pr !== null) openPullRequest();
     } catch (error) {
       if (signal.aborted) return;
       throw new Error(rpcErrorMessage(error));
@@ -230,7 +224,7 @@ function createPullRequestButton(client: PluginClientContext, workspaceId: strin
   const registration = client.addHeaderButton({
     id: BUTTON_ID,
     workspaceId,
-    button: { title: CREATE_PULL_REQUEST_LABEL, icon: ButtonIcon, label: CREATE_PULL_REQUEST_LABEL, disabled: true, behavior: actionBehavior },
+    button: { title: CREATE_PULL_REQUEST_LABEL, icon: buttonIcons[face.icon], label: CREATE_PULL_REQUEST_LABEL, disabled: true, behavior: actionBehavior },
   });
   publish();
   return { directory, workspaceChanged, remove };

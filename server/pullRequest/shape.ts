@@ -17,7 +17,7 @@ const STATES_BY_STATUS: Record<Exclude<CheckStatus, "neutral">, string[]> = {
 const STATUS_OF_STATE = new Map(Object.entries(STATES_BY_STATUS).flatMap(([status, states]) => states.map(state => [state, status as CheckStatus])));
 
 // No state yet means it has not run.
-export const checkStatus = (state: string | null | undefined): CheckStatus => STATUS_OF_STATE.get((state || "PENDING").toUpperCase()) ?? "neutral";
+const checkStatus = (state: string | null | undefined): CheckStatus => STATUS_OF_STATE.get((state || "PENDING").toUpperCase()) ?? "neutral";
 
 export function toCheck(node: StatusContextNode | CheckRunNode): Check {
   const required = node.isRequired ?? null;
@@ -32,7 +32,7 @@ const MERGES_NOW = new Set(["CLEAN", "HAS_HOOKS", "UNSTABLE"]);
 const mergesNow = (pr: DetailPullRequest) => pr.state === "OPEN" && !pr.isDraft && pr.mergeable === "MERGEABLE" && MERGES_NOW.has(pr.mergeStateStatus ?? "");
 
 // The panel offers only what GitHub would let the viewer do; the write itself is still checked by GitHub.
-export function allowedActions(repo: DetailRepository, pr: DetailPullRequest): Action[] {
+function allowedActions(repo: DetailRepository, pr: DetailPullRequest): Action[] {
   const granted = new Set<Action>();
   // Merging belongs to the repository's writers.
   if (canPush(repo.viewerPermission)) {

@@ -3,16 +3,16 @@
 // started and then polled.
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { prStateSchema } from "./pullRequest.ts";
 
 const text = z.string().trim().min(1);
 const count = z.number().int().nonnegative();
 const directory = z.object({ directory: z.string().min(1) });
-const prState = z.enum(["open", "closed", "merged"]);
 
 export const gitStatusSchema = z.object({
   isRepo: z.boolean(),
-  // origin exists, even when push could use another remote.
-  hasPrimaryRemote: z.boolean(),
+  // A pull request needs one; the push goes wherever `git push` would.
+  hasGitHubRemote: z.boolean(),
   isDefaultRef: z.boolean(),
   refName: text.nullable(),
   hasWorkingTreeChanges: z.boolean(),
@@ -20,14 +20,18 @@ export const gitStatusSchema = z.object({
   aheadCount: count,
   behindCount: count,
   aheadOfDefaultCount: count.nullable(),
-  pr: z.object({ number: z.number().int().positive(), title: text, url: z.string(), state: prState }).nullable(),
+  pr: z.object({ number: z.number().int().positive(), title: text, url: z.string(), state: prStateSchema }).nullable(),
 });
 
+// What a press runs on the checked-out branch: commit any changes and push, then, for
+// commit_push_pr, open or create the branch's pull request. On the default branch the button
+// commits and pushes; elsewhere, such as a worktree's branch, it creates the pull request.
+export const createPullRequestActionSchema = z.enum(["commit_push", "commit_push_pr"]);
+
 const createPullRequestResultSchema = z.object({
-  // The feature branch the run cut from the default branch, if it did.
-  branch: text.nullable(),
   commit: z.object({ sha: text, subject: text }).nullable(),
-  pr: z.object({ status: z.enum(["created", "opened_existing"]), number: z.number().int().positive(), url: z.string(), title: text }),
+  // null for commit_push.
+  pr: z.object({ status: z.enum(["created", "opened_existing"]), number: z.number().int().positive(), url: z.string(), title: text }).nullable(),
 });
 
 export const createPullRequestRunSchema = z.discriminatedUnion("status", [
@@ -45,11 +49,12 @@ export const startCreatePullRequestRpc = defineRpc({
   name: "git.create-pr.start",
   // The Paseo workspace the button belongs to; generation agents are created in it, since a
   // daemon-level agent would open a new workspace for every generation.
-  input: run.extend({ workspaceId: text.max(128) }),
+  input: run.extend({ workspaceId: text.max(128), action: createPullRequestActionSchema }),
   output: createPullRequestRunSchema,
 });
 export const createPullRequestRunRpc = defineRpc({ name: "git.create-pr.run", input: run, output: createPullRequestRunSchema });
 
 export type GitStatus = z.infer<typeof gitStatusSchema>;
+export type CreatePullRequestAction = z.infer<typeof createPullRequestActionSchema>;
 export type CreatePullRequestResult = z.infer<typeof createPullRequestResultSchema>;
 export type CreatePullRequestRun = z.infer<typeof createPullRequestRunSchema>;
