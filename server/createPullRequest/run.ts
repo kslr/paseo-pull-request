@@ -1,14 +1,13 @@
-// The Create PR steps for one checkout: refresh the default branch, commit what changed (on a new
-// feature branch when the checkout is on the default branch), push, then open the branch's pull
-// request or create one.
+// The Create PR steps for one checkout: refresh the default branch, commit what changed on the
+// checked-out branch, push it, then open the branch's pull request or create one. The run never
+// creates or switches branches, so the workspace stays on the branch it is working on.
 import type { CreatePullRequestResult } from "../../shared/createPullRequest.ts";
-import { featureBranchName } from "./branchName.ts";
 import type { GitMetadataGenerator, PullRequestText } from "./metadata.ts";
-import type { GitRepository, RepositoryStatus } from "./repository.ts";
+import type { GitRepository } from "./repository.ts";
 
 type Phase = (label: string) => void;
-interface Plan { start: RepositoryStatus; branch: string; defaultRef: string; baseRef: string; cutsBranch: boolean }
-interface Committed { branch: string; commit: CreatePullRequestResult["commit"]; text: PullRequestText | null }
+interface Plan { branch: string; defaultRef: string; baseRef: string }
+interface Committed { commit: CreatePullRequestResult["commit"]; text: PullRequestText | null }
 
 const succeeds = (task: Promise<unknown>) => task.then(() => true, () => false);
 
@@ -25,40 +24,24 @@ async function prepare(repo: GitRepository, phase: Phase): Promise<Plan> {
   const { status: { refName, isDefaultRef }, defaultRef, baseRef } = start;
   if (!refName) throw new Error("Cannot create a pull request from detached HEAD.");
   if (!defaultRef || !baseRef) throw new Error("Cannot resolve the repository's default branch. Fetch it before creating a PR.");
-  // A pull request from the default branch into itself cannot exist, so the commit gets a branch of its own.
-  return { start, branch: refName, defaultRef, baseRef, cutsBranch: isDefaultRef };
-}
-
-// The new branch starts at the remote's default branch when the local one is only behind it, so
-// the pull request does not start out of date; the uncommitted changes come along. With local
-// commits, or changes that collide with the remote's, it starts at HEAD.
-async function cutFeatureBranch(repo: GitRepository, { baseRemote, defaultRef }: RepositoryStatus, preferred?: string) {
-  const branch = featureBranchName((await repo.git(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"])).split("\n"), preferred);
-  const remoteTip = baseRemote && defaultRef ? `refs/remotes/${baseRemote}/${defaultRef}` : null;
-  const startedAtRemote = remoteTip !== null
-    && await succeeds(repo.git(["merge-base", "--is-ancestor", "HEAD", remoteTip]))
-    && await succeeds(repo.git(["switch", "--quiet", "--no-track", "-c", branch, remoteTip]));
-  if (!startedAtRemote) await repo.git(["checkout", "-b", branch]);
-  return branch;
+  // A pull request from the default branch into itself cannot exist.
+  if (isDefaultRef) throw new Error(`Cannot create a pull request from the default branch ${refName}. Create a branch first.`);
+  return { branch: refName, defaultRef, baseRef };
 }
 
 async function commitChanges(repo: GitRepository, generator: GitMetadataGenerator, phase: Phase, plan: Plan): Promise<Committed> {
   await repo.git(["add", "-A"]);
-  if (!(await repo.git(["diff", "--cached", "--name-only", "-z"]))) {
-    if (plan.cutsBranch) throw new Error("Cannot create a feature branch because there are no changes to commit.");
-    return { branch: plan.branch, commit: null, text: null };
-  }
-  // Generated before the branch is cut, from everything the pull request will hold.
+  if (!(await repo.git(["diff", "--cached", "--name-only", "-z"]))) return { commit: null, text: null };
+  // From everything the pull request will hold.
   phase("Generating commit message and PR...");
-  const { commitMessage, title, body, branch: preferred } = await generator.commitAndPullRequest(plan.baseRef, plan.cutsBranch);
-  const branch = plan.cutsBranch ? await cutFeatureBranch(repo, plan.start, preferred) : plan.branch;
+  const { commitMessage, title, body } = await generator.commitAndPullRequest(plan.baseRef);
   phase("Committing...");
   await repo.git(["commit", "-m", commitMessage]);
-  return { branch, commit: { sha: await repo.git(["rev-parse", "HEAD"]), subject: commitMessage }, text: { title, body } };
+  return { commit: { sha: await repo.git(["rev-parse", "HEAD"]), subject: commitMessage }, text: { title, body } };
 }
 
 // To the remote `git push` would choose, as the user configured git, under the branch's own name:
-// a branch tracking another, such as one cut from origin/main, does not overwrite it. A branch
+// a branch tracking another, such as one created from origin/main, does not overwrite it. A branch
 // without an upstream gets the pushed one.
 const push = (repo: GitRepository) => repo.git(["-c", "push.default=current", "-c", "push.autoSetupRemote=true", "push"]);
 
@@ -71,7 +54,7 @@ export function parseCreatedPullRequest(output: string) {
 
 async function propose(repo: GitRepository, generator: GitMetadataGenerator, phase: Phase, plan: Plan, committed: Committed): Promise<CreatePullRequestResult["pr"]> {
   const remote = await repo.github.remote();
-  const existing = await repo.github.branchPullRequest(remote, committed.branch);
+  const existing = await repo.github.branchPullRequest(remote, plan.branch);
   if (existing?.state === "open") return { status: "opened_existing", number: existing.number, url: existing.url, title: existing.title };
   let text = committed.text;
   if (!text) {
@@ -81,7 +64,7 @@ async function propose(repo: GitRepository, generator: GitMetadataGenerator, pha
   phase("Creating pull request...");
   // --repo is the repository branchPullRequest searched: on its own, gh prefers a remote named
   // upstream, and would open the pull request there for a checkout pushed to origin.
-  const args = ["pr", "create", "--repo", `${remote.host}/${remote.repository}`, "--base", plan.defaultRef, "--head", committed.branch, "--title", text.title, "--body-file", "-"];
+  const args = ["pr", "create", "--repo", `${remote.host}/${remote.repository}`, "--base", plan.defaultRef, "--head", plan.branch, "--title", text.title, "--body-file", "-"];
   const { stdout } = await repo.run("gh", args, { cwd: repo.directory, input: text.body });
   return { status: "created", ...parseCreatedPullRequest(stdout), title: text.title };
 }
@@ -92,5 +75,5 @@ export async function createPullRequest(repo: GitRepository, generator: GitMetad
   phase("Pushing...");
   await push(repo);
   const pr = await propose(repo, generator, phase, plan, committed);
-  return { branch: plan.cutsBranch ? committed.branch : null, commit: committed.commit, pr };
+  return { commit: committed.commit, pr };
 }

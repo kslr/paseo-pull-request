@@ -35,15 +35,12 @@ describe("resolveCreatePullRequestButton", () => {
     assert.deepEqual(resolveCreatePullRequestButton(status({ aheadOfDefaultCount: 1 })), create);
   });
 
-  it("creates one from the default branch only when there are changes to name a feature branch from", () => {
+  it("never creates one from the default branch, since the run does not switch branches", () => {
     const main = { refName: "main", isDefaultRef: true };
-    assert.deepEqual(resolveCreatePullRequestButton(status({ ...main, hasWorkingTreeChanges: true })), create);
-    assert.deepEqual(resolveCreatePullRequestButton(status({ ...main, hasWorkingTreeChanges: true, hasUpstream: false })), create);
-    // A clean default ref has nothing to name a feature branch from.
-    const cleanReason = "There are no changes to commit, so a feature branch can't be named. Create a branch yourself or continue on main.";
-    assert.deepEqual(resolveCreatePullRequestButton(status({ ...main, aheadCount: 1 })), { kind: "disabled", hint: cleanReason });
-    assert.deepEqual(resolveCreatePullRequestButton(status({ ...main, hasUpstream: false, aheadCount: 1 })), { kind: "disabled", hint: cleanReason });
-    assert.deepEqual(resolveCreatePullRequestButton(status({ ...main })), { kind: "disabled", hint: "Branch is up to date. No action needed." });
+    const hint = { kind: "disabled", hint: "Can't create a pull request from the default branch main. Create a branch first." } as const;
+    for (const fields of [{ hasWorkingTreeChanges: true }, { hasWorkingTreeChanges: true, hasUpstream: false }, { aheadCount: 1 }, { hasUpstream: false, aheadCount: 1 }, {}]) {
+      assert.deepEqual(resolveCreatePullRequestButton(status({ ...main, ...fields })), hint);
+    }
   });
 
   it("opens the panel when the branch already has an open pull request", () => {
@@ -91,7 +88,7 @@ describe("progress and messages", () => {
     assert.equal(createPullRequestTitle(null), "Create PR");
     assert.equal(createPullRequestTitle("No local commits to push."), "Create PR — No local commits to push.");
     const pr = { number: 7, url: "u", title: "Add things" };
-    assert.equal(createPullRequestToast({ branch: null, commit: null, pr: { ...pr, status: "created" } }), "Created PR #7: Add things");
-    assert.equal(createPullRequestToast({ branch: null, commit: null, pr: { ...pr, status: "opened_existing", title: "x".repeat(80) } }), `Opened PR #7: ${"x".repeat(69)}...`);
+    assert.equal(createPullRequestToast({ commit: null, pr: { ...pr, status: "created" } }), "Created PR #7: Add things");
+    assert.equal(createPullRequestToast({ commit: null, pr: { ...pr, status: "opened_existing", title: "x".repeat(80) } }), `Opened PR #7: ${"x".repeat(69)}...`);
   });
 });

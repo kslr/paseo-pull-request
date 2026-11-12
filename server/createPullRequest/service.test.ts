@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakePaseo } from "./fakePaseo.ts";
 import { CreatePullRequestService } from "./service.ts";
-import { featureBranchName } from "./branchName.ts";
 import { parseWorkingTree } from "./repository.ts";
 import { parseCreatedPullRequest } from "./run.ts";
 import { CommandError, runCommand } from "../process.ts";
@@ -62,7 +61,7 @@ function succeeded(state: CreatePullRequestRun) {
   if (state.status !== "succeeded") throw new Error("Expected success");
   return state.result;
 }
-const generated = (fields: object = {}) => fakePaseo(() => ({ commitMessage: "Add feature.", title: "Add feature", body: "Summary", branch: "add-feature", ...fields }));
+const generated = (fields: object = {}) => fakePaseo(() => ({ commitMessage: "Add feature.", title: "Add feature", body: "Summary", ...fields }));
 
 test("status reports changes, upstream and how far the branch is ahead of the default branch", async () => {
   const h = await harness();
@@ -94,38 +93,51 @@ test("missing gh leaves status usable, and the default branch falls back to repo
   } finally { await other.dispose(); }
 });
 
-test("on the default branch, one generation names the commit, a unique feature branch and the PR", async () => {
+test("one generation writes the commit and the PR, which is opened from the checked-out branch", async () => {
   const api = generated({ body: "## Summary\nFeature\n$(literal)" });
   const h = await harness(gitHub, api);
   try {
-    await h.git(["branch", "feature/add-feature"]); await writeFile(join(h.directory, "new.txt"), "new\n");
+    await h.git(["checkout", "-b", "work"]); await writeFile(join(h.directory, "new.txt"), "new\n");
     const result = succeeded(await h.run());
-    assert.equal(result.branch, "feature/add-feature-2");
     assert.equal(result.commit?.subject, "Add feature");
     assert.deepEqual(result.pr, { status: "created", number: 8, url: "https://github.com/owner/repo/pull/8", title: "Add feature" });
-    assert.deepEqual(h.prCreate()!.args, ["pr", "create", "--repo", "github.com/owner/repo", "--base", "main", "--head", "feature/add-feature-2", "--title", "Add feature", "--body-file", "-"]);
+    assert.deepEqual(h.prCreate()!.args, ["pr", "create", "--repo", "github.com/owner/repo", "--base", "main", "--head", "work", "--title", "Add feature", "--body-file", "-"]);
     assert.ok(h.prCreate()!.options.input!.endsWith("$(literal)"));
-    assert.equal(await h.git(["rev-parse", "refs/heads/feature/add-feature-2"], h.bare), result.commit?.sha);
+    assert.equal(await h.git(["rev-parse", "refs/heads/work"], h.bare), result.commit?.sha);
+    // The workspace stays on its branch, so work can go on there.
+    assert.equal(await h.git(["branch", "--show-current"]), "work");
+    assert.deepEqual(await h.git(["for-each-ref", "--format=%(refname:short)", "refs/heads/"]), "main\nwork");
     assert.deepEqual(api.created.map(input => input.title), ["Commit and PR generator"]); assert.equal(api.archived.length, 1);
   } finally { await h.dispose(); }
 });
 
-for (const onDefault of [true, false]) test(`generation sees everything since the merge base before anything is committed (${onDefault ? "default" : "feature"} branch)`, async () => {
+test("the default branch is refused before anything is generated, committed or switched", async () => {
+  const h = await harness(gitHub, generated());
+  try {
+    await writeFile(join(h.directory, "new.txt"), "new\n");
+    const state = await h.run();
+    assert.equal(state.status, "failed"); assert.equal((state as { message: string }).message, "Cannot create a pull request from the default branch main. Create a branch first.");
+    assert.equal(await h.git(["branch", "--show-current"]), "main");
+    assert.equal(await h.git(["log", "-1", "--format=%s"]), "Initial");
+    assert.equal(h.api.created.length, 0);
+    assert.ok(!h.calls.some(c => c.args.some(arg => ["add", "commit", "push", "checkout", "switch"].includes(arg)) || c.args[0] === "pr"));
+  } finally { await h.dispose(); }
+});
+
+test("generation sees everything since the merge base before anything is committed", async () => {
   const entered = deferred(), release = deferred();
-  const api = fakePaseo(async () => { entered.resolve(); await release.promise; return { commitMessage: "Add staged work", title: "All changes", body: "Summary", branch: "parallel-work" }; });
+  const api = fakePaseo(async () => { entered.resolve(); await release.promise; return { commitMessage: "Add staged work", title: "All changes", body: "Summary" }; });
   const h = await harness(gitHub, api);
   try {
     const base = await h.git(["rev-parse", "HEAD"]);
-    if (!onDefault) {
-      await h.git(["checkout", "-b", "source"]);
-      await writeFile(join(h.directory, "committed.txt"), "earlier change\n");
-      await h.git(["add", "-A"]); await h.git(["commit", "-m", "Earlier work"]);
-      // The base moves on independently: the PR text must use the merge base, not the base's tip.
-      await h.git(["checkout", "main"]);
-      await writeFile(join(h.directory, "base-only.txt"), "unrelated base change\n");
-      await h.git(["add", "-A"]); await h.git(["commit", "-m", "Base advanced"]);
-      await h.git(["push", "origin", "main"]); await h.git(["checkout", "source"]);
-    }
+    await h.git(["checkout", "-b", "source"]);
+    await writeFile(join(h.directory, "committed.txt"), "earlier change\n");
+    await h.git(["add", "-A"]); await h.git(["commit", "-m", "Earlier work"]);
+    // The base moves on independently: the PR text must use the merge base, not the base's tip.
+    await h.git(["checkout", "main"]);
+    await writeFile(join(h.directory, "base-only.txt"), "unrelated base change\n");
+    await h.git(["add", "-A"]); await h.git(["commit", "-m", "Base advanced"]);
+    await h.git(["push", "origin", "main"]); await h.git(["checkout", "source"]);
     await writeFile(join(h.directory, "staged.txt"), "pending staged change\n");
     h.start("run");
     await entered.promise;
@@ -134,13 +146,11 @@ for (const onDefault of [true, false]) test(`generation sees everything since th
     assert.ok(!h.calls.some(c => c.args.some(arg => ["commit", "push", "checkout", "switch", "pr"].includes(arg))));
     const prompt = api.created[0].prompt!;
     assert.ok(prompt.includes("+pending staged change")); assert.ok(prompt.includes("A\tstaged.txt\t(+1 -0)"));
-    assert.equal(prompt.includes("Branch style:"), onDefault);
-    if (!onDefault) { assert.ok(prompt.includes("+earlier change")); assert.ok(!prompt.includes("base-only.txt")); }
+    assert.ok(prompt.includes("+earlier change")); assert.ok(!prompt.includes("base-only.txt"));
     assert.ok(h.calls.some(c => c.args[0] === "diff" && c.args.includes("--cached") && c.args.includes(base)));
     release.resolve();
     const result = succeeded(await h.settled("run"));
     assert.equal(result.pr.status, "created");
-    assert.equal(result.branch, onDefault ? "feature/parallel-work" : null);
     assert.ok(prompt.includes(await h.git(["diff", "origin/main...HEAD", "--no-ext-diff"])));
   } finally { release.resolve(); await h.dispose(); }
 });
@@ -213,6 +223,17 @@ test("one run at a time per checkout, the same runId returns the same run, and c
   } finally { release.resolve(); await h.dispose(); }
 });
 
+test("a failed generation stops the run before anything is committed or pushed", async () => {
+  const h = await harness(gitHub, fakePaseo(() => ({ wrong: true })));
+  try {
+    await h.git(["checkout", "-b", "feature"]); await writeFile(join(h.directory, "new"), "new");
+    const state = await h.run();
+    assert.equal(state.status, "failed"); assert.match((state as { message: string }).message, /Could not write the commit message and pull request/);
+    assert.equal(await h.git(["log", "-1", "--format=%s"]), "Initial");
+    assert.ok(!h.calls.some(c => c.args.includes("push") || c.args[0] === "pr"));
+  } finally { await h.dispose(); }
+});
+
 test("a failing hook stops the run with its message", async () => {
   const h = await harness(gitHub, generated());
   try {
@@ -245,19 +266,11 @@ test("hook output shows as progress, with secrets redacted", async () => {
 test("detached HEAD, and the default branch with nothing to commit, fail without pushing", async () => {
   const h = await harness();
   try {
-    assert.match((await h.run("clean-main") as { message: string }).message, /no changes to commit/);
+    assert.match((await h.run("clean-main") as { message: string }).message, /from the default branch main/);
     await h.git(["checkout", "--detach"]);
     assert.match((await h.run("detached") as { message: string }).message, /detached HEAD/);
     assert.ok(!h.calls.some(c => c.args.includes("push")));
   } finally { await h.dispose(); }
-});
-
-test("feature branch names avoid existing branches and directory conflicts", () => {
-  assert.equal(featureBranchName([], "Add Login Form!"), "feature/add-login-form");
-  assert.equal(featureBranchName([], "fix/typo"), "fix/typo");
-  assert.equal(featureBranchName([]), "feature/update");
-  assert.equal(featureBranchName(["FEATURE"], "hello"), "feature-2/hello");
-  assert.equal(featureBranchName(["feature/hello/child", "feature/hello-2"], "hello"), "feature/hello-3");
 });
 
 test("porcelain status headers and records give the branch, its upstream counts and whether anything changed", () => {
@@ -282,27 +295,18 @@ async function advanceRemoteMain(h: Awaited<ReturnType<typeof harness>>, file: s
   return h.git(["rev-parse", "HEAD"], other);
 }
 
-test("a feature branch from a main that is only behind starts at the fetched remote tip", async () => {
-  const api = generated({ branch: "local-work" });
+test("the run fetches the default branch first, and leaves the checkout where it was", async () => {
+  const api = generated();
   const h = await harness(gitHub, api);
   try {
+    await h.git(["checkout", "-b", "work"]);
     const remoteTip = await advanceRemoteMain(h, "remote-only.txt", "already on main\n");
-    await writeFile(join(h.directory, "local.txt"), "local change\n");
-    assert.equal(succeeded(await h.run()).branch, "feature/local-work");
-    assert.equal(await h.git(["rev-parse", "HEAD^"]), remoteTip, "the branch starts at the remote's current main");
-    assert.equal(await h.git(["show", "HEAD:local.txt"]), "local change");
-    assert.ok(!api.created[0].prompt!.includes("remote-only.txt"), "merged remote work is not described as the PR's");
-  } finally { await h.dispose(); }
-});
-
-test("a feature branch falls back to HEAD when the changes collide with the remote's", async () => {
-  const h = await harness(gitHub, generated({ branch: "edit-tracked" }));
-  try {
-    await advanceRemoteMain(h, "tracked.txt", "remote edit\n");
     const localHead = await h.git(["rev-parse", "HEAD"]);
-    await writeFile(join(h.directory, "tracked.txt"), "local edit\n");
-    assert.equal(succeeded(await h.run()).branch, "feature/edit-tracked");
-    assert.equal(await h.git(["rev-parse", "HEAD^"]), localHead);
-    assert.equal(await h.git(["show", "HEAD:tracked.txt"]), "local edit");
+    await writeFile(join(h.directory, "local.txt"), "local change\n");
+    succeeded(await h.run());
+    assert.equal(await h.git(["rev-parse", "refs/remotes/origin/main"]), remoteTip);
+    assert.equal(await h.git(["rev-parse", "HEAD^"]), localHead, "the commit goes on the branch as it was, not on the remote's main");
+    assert.equal(await h.git(["branch", "--show-current"]), "work");
+    assert.ok(!api.created[0].prompt!.includes("remote-only.txt"), "the remote's work is not described as the PR's");
   } finally { await h.dispose(); }
 });

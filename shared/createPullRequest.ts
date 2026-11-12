@@ -24,8 +24,6 @@ export const gitStatusSchema = z.object({
 });
 
 const createPullRequestResultSchema = z.object({
-  // The feature branch the run cut from the default branch, if it did.
-  branch: text.nullable(),
   commit: z.object({ sha: text, subject: text }).nullable(),
   pr: z.object({ status: z.enum(["created", "opened_existing"]), number: z.number().int().positive(), url: z.string(), title: text }),
 });

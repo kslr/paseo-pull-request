@@ -24,8 +24,10 @@ function blockedReason(status: GitStatus | null): string | null {
   if (pr && !status.hasWorkingTreeChanges && status.aheadCount === 0) return `Pull request #${pr.number} is already ${pr.state}.`;
   if (refName === null) return "Create and checkout a ref before pushing or opening a pull request.";
   if (!status.hasGitHubRemote) return "Add a GitHub remote before creating a pull request.";
-  // Uncommitted changes are committed by the run, onto a feature branch named from them when on
-  // the default branch.
+  // A pull request from the default branch into itself cannot exist, and the run never switches
+  // the workspace to another branch.
+  if (status.isDefaultRef) return `Can't create a pull request from the default branch ${refName}. Create a branch first.`;
+  // Uncommitted changes are committed by the run onto the current branch.
   if (status.hasWorkingTreeChanges) return null;
   // Otherwise the run only pushes the commits already on the branch: is there anything to push
   // and propose, and can it be pushed as it is?
@@ -37,9 +39,7 @@ function blockedReason(status: GitStatus | null): string | null {
     // Pushed already, but commits still not on the default branch are a pull request.
     return "Branch is up to date. No action needed.";
   }
-  // A pull request from the default branch into itself cannot exist, and without changes there is
-  // nothing to name a feature branch from.
-  return status.isDefaultRef ? `There are no changes to commit, so a feature branch can't be named. Create a branch yourself or continue on ${refName}.` : null;
+  return null;
 }
 
 export function createPullRequestTitle(detail: string | null): string {
