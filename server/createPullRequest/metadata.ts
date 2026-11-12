@@ -31,7 +31,7 @@ const MAX_DIFF = 200_000;
 const ATTEMPTS = 3;
 
 export interface PullRequestText { title: string; body: string }
-type Generated = PullRequestText & { commitMessage?: string };
+type Generated = Partial<PullRequestText> & { commitMessage?: string };
 
 // The first line, without trailing periods, cut to 72 characters.
 function commitSubject(raw: string) {
@@ -40,15 +40,16 @@ function commitSubject(raw: string) {
 }
 
 function task(parts: Part[]) {
+  if (!parts.includes("pullRequest")) return "Write a concise git commit message for the staged changes below.";
   return parts.includes("commit")
     ? "Write a concise git commit message for the staged changes, and a pull request title and body for all the changes below (the pull request will hold the commit)."
     : "Write a pull request title and body for the changes below.";
 }
 
-// "'a', 'b' and 'c'"
+// "'a'", "'a', 'b' and 'c'"
 const listFields = (fields: string[]) => {
   const quoted = fields.map(field => `'${field}'`);
-  return `${quoted.slice(0, -1).join(", ")} and ${quoted.at(-1)}`;
+  return quoted.length === 1 ? quoted[0] : `${quoted.slice(0, -1).join(", ")} and ${quoted.at(-1)}`;
 };
 
 // One line per file, its change as A, D or M and its line counts, then the patch.
@@ -88,11 +89,16 @@ export class GitMetadataGenerator {
   // The staged changes' commit message and the text of the pull request that will hold them, from
   // one generation.
   async commitAndPullRequest(baseRef: string): Promise<PullRequestText & { commitMessage: string }> {
-    const { title, body, commitMessage = "" } = await this.describe(baseRef, ["commit", "pullRequest"]);
+    const { title = "", body = "", commitMessage = "" } = await this.describe(baseRef, ["commit", "pullRequest"]);
     return { commitMessage: commitSubject(commitMessage), title, body };
   }
+  // The staged changes' commit message alone, for a push to the default branch: from the changes
+  // since HEAD, as no pull request gathers them with earlier commits.
+  async commit(): Promise<string> {
+    return commitSubject((await this.describe("HEAD", ["commit"])).commitMessage ?? "");
+  }
   async pullRequest(baseRef: string): Promise<PullRequestText> {
-    const { title, body } = await this.describe(baseRef, ["pullRequest"]);
+    const { title = "", body = "" } = await this.describe(baseRef, ["pullRequest"]);
     return { title, body };
   }
 
@@ -104,10 +110,12 @@ export class GitMetadataGenerator {
       return `${label}:\n${overrides?.[key]?.instructions?.trim() || text}`;
     });
     const prompt = [task(parts), ...styles, [`Return JSON only with fields ${listFields(Object.keys(schema.shape))}.`, "", ...(await this.changes(baseRef))].join("\n")].join("\n\n");
-    const withCommit = parts.includes("commit");
-    const generated = await this.generate(prompt, schema, withCommit ? "CommitAndPullRequest" : "PullRequest", withCommit ? "Commit and PR generator" : "PR generator");
+    const [schemaName, title, what] = !parts.includes("pullRequest") ? ["CommitMessage", "Commit message generator", "commit message"]
+      : parts.includes("commit") ? ["CommitAndPullRequest", "Commit and PR generator", "commit message and pull request"]
+      : ["PullRequest", "PR generator", "pull request"];
+    const generated = await this.generate(prompt, schema, schemaName, title);
     // A placeholder would publish text that says nothing about the changes, so the run stops.
-    if (generated === null) throw new Error(`Could not write the ${withCommit ? "commit message and pull request" : "pull request"}: no model in Paseo's metadata generation settings gave a valid answer.`);
+    if (generated === null) throw new Error(`Could not write the ${what}: no model in Paseo's metadata generation settings gave a valid answer.`);
     return generated;
   }
   private async styleOverrides(): Promise<StyleOverrides> {

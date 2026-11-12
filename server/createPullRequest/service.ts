@@ -69,7 +69,7 @@ export class CreatePullRequestService {
     this.busy.set(directory, job);
     const repo = new GitRepository(directory, this.reportingRunner(job));
     const generator = new GitMetadataGenerator(paseo, input.workspaceId, repo, job.controller.signal);
-    job.done = createPullRequest(repo, generator, label => { job.state = running(label); }).then(
+    job.done = createPullRequest(repo, generator, label => { job.state = running(label); }, input.action).then(
       (result): CreatePullRequestRun => ({ status: "succeeded", result }),
       (error): CreatePullRequestRun => ({ status: "failed", message: redactError((error as Error).message) }),
     ).then(state => {

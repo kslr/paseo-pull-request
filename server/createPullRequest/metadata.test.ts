@@ -52,7 +52,7 @@ test("an empty list is Automatic: built-in defaults over enabled providers", asy
   ]);
 });
 
-test("one generation asks for each part with its paseo.json style, and never for a branch name", async () => {
+test("one generation asks for each part with its paseo.json style", async () => {
   const api = fakePaseo(() => ({ commitMessage: "Add thing.\nmore", title: "Add thing", body: "Body" }));
   const h = await harness(api, "x".repeat(210_000));
   try {
@@ -73,7 +73,14 @@ test("one generation asks for each part with its paseo.json style, and never for
     assert.equal(api.created[1].title, "PR generator");
     assert.ok(api.created[1].prompt!.startsWith("Write a pull request title and body for the changes below.\n\nPull request style:"));
     assert.ok(!api.created[1].prompt!.includes("commitMessage"));
-    assert.deepEqual(api.archived, [1, 2]);
+    // Pushing to the default branch: the commit message alone, from the changes since HEAD.
+    h.calls.length = 0;
+    assert.equal(await h.generator.commit(), "Add thing");
+    assert.equal(api.created[2].title, "Commit message generator");
+    assert.ok(api.created[2].prompt!.startsWith("Write a concise git commit message for the staged changes below.\n\nCommit message style:\nChinese commits.\n\nReturn JSON only with fields 'commitMessage'."));
+    assert.ok(!api.created[2].prompt!.includes("Pull request style"));
+    assert.deepEqual(h.calls.find(args => args[0] === "merge-base"), ["merge-base", "HEAD", "HEAD"]);
+    assert.deepEqual(api.archived, [1, 2, 3]);
   } finally { await h.dispose(); }
 });
 

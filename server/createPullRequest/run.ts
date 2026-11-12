@@ -1,17 +1,17 @@
-// The Create PR steps for one checkout: refresh the default branch, commit what changed on the
-// checked-out branch, push it, then open the branch's pull request or create one. The run never
-// creates or switches branches, so the workspace stays on the branch it is working on.
-import type { CreatePullRequestResult } from "../../shared/createPullRequest.ts";
+// The header button's steps for one checkout, always on the checked-out branch: refresh the default
+// branch, commit what changed, push, then, for commit_push_pr, open the branch's pull request or
+// create one. The run never creates or switches branches.
+import type { CreatePullRequestAction, CreatePullRequestResult } from "../../shared/createPullRequest.ts";
 import type { GitMetadataGenerator, PullRequestText } from "./metadata.ts";
 import type { GitRepository } from "./repository.ts";
 
 type Phase = (label: string) => void;
-interface Plan { branch: string; defaultRef: string; baseRef: string }
+interface Plan { action: CreatePullRequestAction; branch: string; defaultRef: string; baseRef: string }
 interface Committed { commit: CreatePullRequestResult["commit"]; text: PullRequestText | null }
 
 const succeeds = (task: Promise<unknown>) => task.then(() => true, () => false);
 
-async function prepare(repo: GitRepository, phase: Phase): Promise<Plan> {
+async function prepare(repo: GitRepository, phase: Phase, action: CreatePullRequestAction): Promise<Plan> {
   let start = await repo.readStatus();
   if (!start.status.isRepo) throw new Error("This directory is not a Git repository.");
   // Otherwise the base and the diff the PR text is written from are whatever was last fetched.
@@ -22,22 +22,28 @@ async function prepare(repo: GitRepository, phase: Phase): Promise<Plan> {
     if (await succeeds(repo.git(["fetch", "--quiet", "--no-tags", start.baseRemote, refspec]))) start = await repo.readStatus();
   }
   const { status: { refName, isDefaultRef }, defaultRef, baseRef } = start;
-  if (!refName) throw new Error("Cannot create a pull request from detached HEAD.");
+  if (!refName) throw new Error("Cannot push or create a pull request from detached HEAD.");
   if (!defaultRef || !baseRef) throw new Error("Cannot resolve the repository's default branch. Fetch it before creating a PR.");
   // A pull request from the default branch into itself cannot exist.
-  if (isDefaultRef) throw new Error(`Cannot create a pull request from the default branch ${refName}. Create a branch first.`);
-  return { branch: refName, defaultRef, baseRef };
+  if (action === "commit_push_pr" && isDefaultRef) throw new Error(`Cannot create a pull request from the default branch ${refName}. Commit and push to it instead.`);
+  return { action, branch: refName, defaultRef, baseRef };
 }
 
 async function commitChanges(repo: GitRepository, generator: GitMetadataGenerator, phase: Phase, plan: Plan): Promise<Committed> {
   await repo.git(["add", "-A"]);
   if (!(await repo.git(["diff", "--cached", "--name-only", "-z"]))) return { commit: null, text: null };
-  // From everything the pull request will hold.
-  phase("Generating commit message and PR...");
-  const { commitMessage, title, body } = await generator.commitAndPullRequest(plan.baseRef);
+  let commitMessage: string, text: PullRequestText | null = null;
+  if (plan.action === "commit_push") {
+    phase("Generating commit message...");
+    commitMessage = await generator.commit();
+  } else {
+    // From everything the pull request will hold.
+    phase("Generating commit message and PR...");
+    ({ commitMessage, ...text } = await generator.commitAndPullRequest(plan.baseRef));
+  }
   phase("Committing...");
   await repo.git(["commit", "-m", commitMessage]);
-  return { commit: { sha: await repo.git(["rev-parse", "HEAD"]), subject: commitMessage }, text: { title, body } };
+  return { commit: { sha: await repo.git(["rev-parse", "HEAD"]), subject: commitMessage }, text };
 }
 
 // To the remote `git push` would choose, as the user configured git, under the branch's own name:
@@ -52,7 +58,7 @@ export function parseCreatedPullRequest(output: string) {
   return { number: Number(number), url };
 }
 
-async function propose(repo: GitRepository, generator: GitMetadataGenerator, phase: Phase, plan: Plan, committed: Committed): Promise<CreatePullRequestResult["pr"]> {
+async function propose(repo: GitRepository, generator: GitMetadataGenerator, phase: Phase, plan: Plan, committed: Committed): Promise<NonNullable<CreatePullRequestResult["pr"]>> {
   const remote = await repo.github.remote();
   const existing = await repo.github.branchPullRequest(remote, plan.branch);
   if (existing?.state === "open") return { status: "opened_existing", number: existing.number, url: existing.url, title: existing.title };
@@ -69,11 +75,11 @@ async function propose(repo: GitRepository, generator: GitMetadataGenerator, pha
   return { status: "created", ...parseCreatedPullRequest(stdout), title: text.title };
 }
 
-export async function createPullRequest(repo: GitRepository, generator: GitMetadataGenerator, phase: Phase): Promise<CreatePullRequestResult> {
-  const plan = await prepare(repo, phase);
+export async function createPullRequest(repo: GitRepository, generator: GitMetadataGenerator, phase: Phase, action: CreatePullRequestAction): Promise<CreatePullRequestResult> {
+  const plan = await prepare(repo, phase, action);
   const committed = await commitChanges(repo, generator, phase, plan);
   phase("Pushing...");
   await push(repo);
-  const pr = await propose(repo, generator, phase, plan, committed);
+  const pr = action === "commit_push" ? null : await propose(repo, generator, phase, plan, committed);
   return { commit: committed.commit, pr };
 }
